@@ -2,4 +2,4 @@ name: astrbot_plugin_LLMTempBan+ # 这是你的插件的唯一识别名。
 desc: 让bot学会主动拉黑或者通过管理员指令拉黑。 # 插件简短描述
 version: v1.0 # 插件版本号。格式：v1.1.1 或者 v1.1
 author: ハ·7 # 作者
-repo: https://github.com/204343414/astrbot_plugin_LLMTempBan+ # 插件的仓库地址
+repo: https://github.com/204343414/astrbot_plugin_LLMTempBan- # 插件的仓库地址
