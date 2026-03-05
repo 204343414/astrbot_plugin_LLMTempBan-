@@ -1,0 +1,14 @@
+{
+  "administrators": {
+    "description": "管理员用户ID列表（支持多个,BOT账号会自动添加为管理员）",
+    "type": "list",
+    "hint": "输入用户ID（字符串格式），多个ID用英文逗号分隔或分行。例如：['123456', '789012']",
+    "default": []
+  },
+  "default_blacklist_duration": {
+    "description": "默认拉黑时长（分钟）",
+    "type": "int",
+    "hint": "未指定时长时，拉黑操作的默认持续时间（必须为正整数）",
+    "default": 5
+  }
+}

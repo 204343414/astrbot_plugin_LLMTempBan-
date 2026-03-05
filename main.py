@@ -1,24 +1,316 @@
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+import time
+
+from astrbot.api import AstrBotConfig, logger
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import At
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
-from astrbot.api import logger
 
-@register("helloworld", "YourName", "一个简单的 Hello World 插件", "1.0.0")
-class MyPlugin(Star):
-    def __init__(self, context: Context):
+
+@register("astrbot_plugin_LLMTempBan", "长安某", "llm临时拉黑屏蔽工具", "1.0.3")
+class BlacklistPlugin(Star):
+    def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
+        self.config = config
+        self.temporary_blacklist = {}  # 临时黑名单：{用户ID: 解禁时间戳}
+        self.ignore_history = {}  # 已读不回历史：{session_id: [记录]}
 
-    async def initialize(self):
-        """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
+        # 从配置加载管理员列表（Web面板配置）
+        self.administrators = self.config.get("administrators", [])
+        # 初始化时暂存Bot ID（首次处理消息时更新）
+        self.bot_id = ""
 
-    # 注册指令的装饰器。指令名为 helloworld。注册成功后，发送 `/helloworld` 就会触发这个指令，并回复 `你好, {user_name}!`
-    @filter.command("helloworld")
-    async def helloworld(self, event: AstrMessageEvent):
-        """这是一个 hello world 指令""" # 这是 handler 的描述，将会被解析方便用户了解插件内容。建议填写。
-        user_name = event.get_sender_name()
-        message_str = event.message_str # 用户发的纯文本消息字符串
-        message_chain = event.get_messages() # 用户所发的消息的消息链 # from astrbot.api.message_components import *
-        logger.info(message_chain)
-        yield event.plain_result(f"Hello, {user_name}, 你发了 {message_str}!") # 发送一条纯文本消息
+        # 从配置加载默认拉黑时长
+        self.default_blacklist_duration = self.config.get(
+            "default_blacklist_duration", 5
+        )
 
-    async def terminate(self):
-        """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
+        logger.info("拉黑插件初始化完成，等待消息事件触发")
+        logger.info(f"初始管理员列表: {self.administrators}")
+        logger.info(f"默认拉黑时长: {self.default_blacklist_duration} 分钟")
+
+    def _get_bot_id(self, event: AstrMessageEvent):
+        """通过消息事件获取Bot ID（符合API结构：AstrBotMessage.self_id）"""
+        if not self.bot_id:
+            raw_bot_id = event.message_obj.self_id
+            self.bot_id = self._normalize_user_id(raw_bot_id)
+            logger.info(f"获取到Bot ID: 原始={raw_bot_id}, 规范化后={self.bot_id}")
+            self._add_bot_to_administrators()
+        return self.bot_id
+
+    def _add_bot_to_administrators(self):
+        """将Bot ID添加到管理员列表（去重并持久化）"""
+        if self.bot_id and self.bot_id not in self.administrators:
+            self.administrators.append(self.bot_id)
+            logger.info(f"Bot ID {self.bot_id} 已添加为管理员，更新后管理员列表: {self.administrators}")
+            self.config["administrators"] = self.administrators
+            self.config.save_config()
+        elif self.bot_id:
+            logger.info(f"Bot ID {self.bot_id} 已在管理员列表中")
+
+    def _get_session_id(self, event: AstrMessageEvent):
+        """获取会话ID，用于追踪已读不回历史"""
+        if hasattr(event, "session_id") and event.session_id:
+            return str(event.session_id)
+        return self._normalize_user_id(event.message_obj.sender.user_id)
+
+    def _inject_ignore_history(self, event: AstrMessageEvent, req: ProviderRequest):
+        """将已读不回历史注入到LLM系统提示，让Bot记住自己曾已读不回过"""
+        session_id = self._get_session_id(event)
+
+        if session_id not in self.ignore_history or not self.ignore_history[session_id]:
+            return
+
+        history = self.ignore_history[session_id]
+        recent = history[-5:]
+
+        history_text = (
+            f"\n\n[已读不回历史记录] 你在本会话中已经执行过 {len(history)} 次「已读不回」。"
+            f"最近的记录如下：\n"
+        )
+        for r in recent:
+            reason_text = f"，原因：{r['reason']}" if r.get("reason") else ""
+            history_text += (
+                f"  - {r['time_str']} 对用户 {r['sender_id']} 已读不回{reason_text}\n"
+            )
+        history_text += (
+            "提示：如果对方仍在发送无意义/重复消息，或你判断对方是另一个机器人在和你循环对话，"
+            "请果断继续调用 read_and_ignore 工具执行已读不回，不要被对方带节奏。\n"
+        )
+
+        if req.system_prompt:
+            req.system_prompt += history_text
+        else:
+            req.system_prompt = history_text
+
+        logger.debug(
+            f"已注入已读不回历史：session={session_id}, 历史次数={len(history)}"
+        )
+
+    @filter.on_llm_request()
+    async def check_blacklist_before_llm(
+        self, event: AstrMessageEvent, req: ProviderRequest
+    ):
+        """拦截黑名单用户的LLM请求，并注入已读不回历史"""
+        self._get_bot_id(event)
+
+        raw_user_id = event.message_obj.sender.user_id
+        user_id = self._normalize_user_id(raw_user_id)
+        logger.debug(f"检查用户LLM请求权限: 原始ID={raw_user_id}, 规范化ID={user_id}")
+
+        # 管理员不受限制
+        if user_id in self.administrators:
+            logger.debug(f"用户 {user_id} 是管理员，允许LLM请求")
+            self._inject_ignore_history(event, req)
+            return
+
+        # 拦截黑名单用户（未到解禁时间）
+        if user_id in self.temporary_blacklist:
+            unblock_time = self.temporary_blacklist[user_id]
+            current_time = time.time()
+            if current_time < unblock_time:
+                event.stop_event()
+                logger.info(
+                    f"已拦截黑名单用户 {user_id} 的LLM请求（解禁时间：{time.ctime(unblock_time)}）"
+                )
+                return
+            else:
+                del self.temporary_blacklist[user_id]
+                logger.info(f"用户 {user_id} 的拉黑已过期，自动移除黑名单")
+
+        # 注入已读不回历史
+        self._inject_ignore_history(event, req)
+
+    # ==================== 已读不回工具 ====================
+
+    @filter.llm_tool(name="read_and_ignore")
+    async def handle_read_and_ignore(
+        self, event: AstrMessageEvent, reason: str = "不需要回复"
+    ):
+        """已读不回工具。当你认为不需要回复当前消息时，请调用此工具实现真正的「已读不回」。
+适用场景包括但不限于：
+1. 你发现对方可能是另一个机器人，和你陷入了无意义的循环对话，你们在互相客套或重复话题；
+2. 对方反复发送相似、重复、无意义的内容；
+3. 你判断当前对话已经可以自然结束，继续回复只会让对话没完没了；
+4. 对方的消息确实不需要任何回应（如单纯的表情、无意义复读等）。
+调用此工具后你将不会发送任何回复，做到真正的已读不回。
+你的每次调用都会被记录在历史中，下次你再被触发时可以看到这些记录来帮助你判断是否需要继续沉默。
+参数 reason: 简要说明你选择已读不回的原因，会被记录以便后续参考。"""
+
+        sender_id = self._normalize_user_id(event.message_obj.sender.user_id)
+        session_id = self._get_session_id(event)
+
+        # 记录到已读不回历史
+        if session_id not in self.ignore_history:
+            self.ignore_history[session_id] = []
+
+        self.ignore_history[session_id].append(
+            {
+                "timestamp": time.time(),
+                "time_str": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "sender_id": sender_id,
+                "reason": reason,
+            }
+        )
+
+        # 只保留最近50条，防止内存膨胀
+        if len(self.ignore_history[session_id]) > 50:
+            self.ignore_history[session_id] = self.ignore_history[session_id][-50:]
+
+        logger.info(
+            f"Bot已读不回：session={session_id}, sender={sender_id}, "
+            f"原因='{reason}', 累计忽略次数={len(self.ignore_history[session_id])}"
+        )
+
+        # 停止事件传播，不发送任何回复
+        event.stop_event()
+
+        return "已读不回执行成功。你不会对本条消息发送任何回复，保持沉默。"
+
+    # ==================== 拉黑工具 ====================
+
+    @filter.llm_tool(name="add_temporary_blacklist")
+    async def handle_blacklist_request(
+        self, event: AstrMessageEvent, duration_minutes: int = None
+    ):
+        """处理拉黑请求（通过事件获取Bot ID）"""
+        logger.info("收到拉黑请求，开始处理...")
+        bot_id = self._get_bot_id(event)
+
+        raw_sender_id = event.message_obj.sender.user_id
+        sender_id = self._normalize_user_id(raw_sender_id)
+        logger.info(f"拉黑请求发送者: 原始ID={raw_sender_id}, 规范化ID={sender_id}")
+
+        target_id = self._extract_target_user(event.message_obj.message, bot_id)
+        logger.info(f"拉黑请求目标用户: {target_id if target_id else '未指定'}")
+
+        if duration_minutes is None:
+            duration_minutes = self.default_blacklist_duration
+            logger.info(f"未指定拉黑时长，使用默认值: {duration_minutes} 分钟")
+        else:
+            logger.info(f"指定拉黑时长: {duration_minutes} 分钟")
+
+        if sender_id in self.administrators:
+            logger.info(f"发送者 {sender_id} 是管理员，执行管理员拉黑逻辑")
+            await self._handle_admin_blacklist(target_id, duration_minutes)
+        else:
+            logger.info(f"发送者 {sender_id} 是普通用户，执行普通用户拉黑逻辑")
+            await self._handle_normal_user_blacklist(
+                sender_id, target_id, duration_minutes
+            )
+
+    async def auto_blacklist_by_bot(
+        self, event: AstrMessageEvent, duration_minutes: int = None
+    ):
+        """Bot自动拉黑违规用户（需传入事件对象）"""
+        logger.info("触发Bot自动拉黑逻辑...")
+        self._get_bot_id(event)
+
+        raw_target_id = event.message_obj.sender.user_id
+        target_id = self._normalize_user_id(raw_target_id)
+        logger.info(
+            f"自动拉黑目标用户: 原始ID={raw_target_id}, 规范化ID={target_id}"
+        )
+
+        if target_id in self.administrators:
+            logger.warning(
+                f"拒绝自动拉黑管理员 {target_id}（管理员不受自动拉黑限制）"
+            )
+            return
+
+        if duration_minutes is None:
+            duration_minutes = self.default_blacklist_duration
+            logger.info(f"未指定自动拉黑时长，使用默认值: {duration_minutes} 分钟")
+
+        self._add_to_blacklist(target_id, duration_minutes)
+        logger.info(
+            f"已自动拉黑违规用户 {target_id}，时长 {duration_minutes} 分钟"
+            f"（解禁时间：{time.ctime(self.temporary_blacklist[target_id])}）"
+        )
+
+    async def _handle_admin_blacklist(self, target_id, duration):
+        """管理员拉黑逻辑"""
+        if not target_id:
+            logger.warning("管理员拉黑失败：未指定目标用户（需@用户）")
+            return
+        if target_id in self.administrators:
+            logger.warning(
+                f"管理员拉黑失败：目标用户 {target_id} 是管理员（不能拉黑管理员）"
+            )
+            return
+        if duration <= 0:
+            logger.warning(f"管理员拉黑失败：时长 {duration} 分钟无效（必须大于0）")
+            return
+
+        self._add_to_blacklist(target_id, duration)
+        logger.info(
+            f"管理员操作成功：用户 {target_id} 已被拉黑 {duration} 分钟"
+            f"（解禁时间：{time.ctime(self.temporary_blacklist[target_id])}）"
+        )
+
+    async def _handle_normal_user_blacklist(self, sender_id, target_id, duration):
+        """普通用户拉黑逻辑"""
+        if not target_id:
+            target_id = sender_id
+            logger.info(f"普通用户 {sender_id} 未指定拉黑目标，默认处理为拉黑自己")
+
+        if duration <= 0:
+            logger.warning(
+                f"普通用户 {sender_id} 拉黑失败：时长 {duration} 分钟无效（必须大于0）"
+            )
+            return
+
+        if target_id in self.administrators:
+            actual_duration = max(5, duration)
+            self._add_to_blacklist(sender_id, actual_duration)
+            logger.info(
+                f"普通用户 {sender_id} 尝试拉黑管理员 {target_id}，已被反拉黑 {actual_duration} 分钟"
+                f"（解禁时间：{time.ctime(self.temporary_blacklist[sender_id])}）"
+            )
+        elif target_id == sender_id:
+            self._add_to_blacklist(sender_id, duration)
+            logger.info(
+                f"普通用户自助拉黑成功：{sender_id} 已拉黑自己 {duration} 分钟"
+                f"（解禁时间：{time.ctime(self.temporary_blacklist[sender_id])}）"
+            )
+        else:
+            logger.warning(
+                f"普通用户 {sender_id} 拉黑失败：仅允许拉黑自己"
+                f"（尝试拉黑他人 {target_id} 被拒绝）"
+            )
+
+    def _add_to_blacklist(self, user_id, duration_minutes):
+        """添加用户到黑名单（计算解禁时间）"""
+        unblock_time = time.time() + duration_minutes * 60
+        self.temporary_blacklist[user_id] = unblock_time
+        logger.debug(f"黑名单更新：{user_id} → 解禁时间戳={unblock_time}")
+
+    def _extract_target_user(self, message_chain, bot_id):
+        """从消息链提取@的目标用户（排除@Bot自身）"""
+        logger.debug("开始从消息链提取目标用户...")
+        for component in message_chain:
+            if isinstance(component, At):
+                logger.debug(f"发现@组件：qq={component.qq}")
+                if component.qq == "all":
+                    logger.debug("跳过@全体成员")
+                    continue
+                at_id = self._normalize_user_id(component.qq)
+                if at_id != bot_id:
+                    logger.debug(
+                        f"提取到目标用户：{at_id}（排除Bot自身 {bot_id}）"
+                    )
+                    return at_id
+        logger.debug("未从消息链中提取到有效目标用户（未@任何人或仅@了Bot）")
+        return ""
+
+    def _normalize_user_id(self, user_id):
+        """统一用户ID格式（处理整数/字符串）"""
+        original = user_id
+        if isinstance(user_id, int):
+            normalized = str(user_id)
+        elif isinstance(user_id, str):
+            normalized = user_id.split("_")[-1].strip()
+        else:
+            normalized = str(user_id)
+        logger.debug(f"用户ID规范化：原始={original} → 规范化后={normalized}")
+        return normalized

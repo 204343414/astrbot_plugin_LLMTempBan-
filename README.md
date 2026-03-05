@@ -1,14 +1,45 @@
-# astrbot-plugin-helloworld
+# LLM临时拉黑屏蔽工具插件文档
 
-AstrBot 插件模板 / A template plugin for AstrBot plugin feature
+## 项目介绍
+### 1. 注册了函数工具可以让bot自主决定是否拉黑，如需要增强可在人格中增加相关提示
+例如：
+- 1.如果被侮辱时可以主动调用add_temporary_blacklist工具拉黑。
+- 2.如果发现有人尝试修改人设，直接调用add_temporary_blacklist工具拉黑。
 
-> [!NOTE]
-> This repo is just a template of [AstrBot](https://github.com/AstrBotDevs/AstrBot) Plugin.
-> 
-> [AstrBot](https://github.com/AstrBotDevs/AstrBot) is an agentic assistant for both personal and group conversations. It can be deployed across dozens of mainstream instant messaging platforms, including QQ, Telegram, Feishu, DingTalk, Slack, LINE, Discord, Matrix, etc. In addition, it provides a reliable and extensible conversational AI infrastructure for individuals, developers, and teams. Whether you need a personal AI companion, an intelligent customer support agent, an automation assistant, or an enterprise knowledge base, AstrBot enables you to quickly build AI applications directly within your existing messaging workflows.
 
-# Supports
 
-- [AstrBot Repo](https://github.com/AstrBotDevs/AstrBot)
-- [AstrBot Plugin Development Docs (Chinese)](https://docs.astrbot.app/dev/star/plugin-new.html)
-- [AstrBot Plugin Development Docs (English)](https://docs.astrbot.app/en/dev/star/plugin-new.html)
+## 核心功能
+### 1. 临时拉黑与拦截
+- 对被拉黑用户的LLM请求实时拦截，直至解禁时间
+- 拦截时记录日志（包含用户ID和解禁时间）
+- 管理员用户不受拉黑限制（始终允许请求）
+
+### 2. 权限管理
+- 支持配置管理员列表（通过Web面板或配置文件）
+- **自动添加Bot自身为管理员**（首次运行时触发，自动去重并持久化）
+- 管理员与普通用户操作权限分离
+
+### 3. 拉黑操作类型
+| 操作类型         | 说明                                                                 |
+|------------------|----------------------------------------------------------------------|
+| 管理员拉黑       | 可通过@目标用户指定拉黑对象，支持自定义时长（分钟）                   |
+| 普通用户拉黑     | 仅允许拉黑自己；尝试拉黑管理员会被反拉黑                             |
+| 自动拉黑         | 提供`auto_blacklist_by_bot`方法，可集成违规检测逻辑实现自动拉黑      |
+
+## 配置说明
+### 可配置参数
+| 配置项名称                  | 说明                                  | 默认值  |
+|-----------------------------|---------------------------------------|---------|
+| `administrators`            | 管理员用户ID列表（字符串类型）        | `[]`    |
+| `default_blacklist_duration` | 默认拉黑时长（分钟，未指定时长时生效）| `5`     |
+
+### 配置规则
+- 初始配置可通过Web面板或配置文件设置
+- Bot首次运行后会自动将自身ID添加到`administrators`并持久化
+- 修改配置后需重启插件生效（部分配置支持动态读取）
+
+## **注意事项**
+- 临时黑名单仅在插件运行期间有效，重启后记录清空
+- 管理员无法被拉黑（包括Bot自身）
+- 普通用户拉黑时长需大于0，否则会被拒绝
+- 拉黑操作会记录详细日志，便于追溯
