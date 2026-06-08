@@ -10,5 +10,35 @@
     "type": "int",
     "hint": "未指定时长时，拉黑操作的默认持续时间（必须为正整数）",
     "default": 5
+  },
+  "ignore_cooldown": {
+    "description": "已读不回冷却时间（秒），冷却期内直接跳过LLM不烧token",
+    "type": "int",
+    "hint": "在已读不回后，这段时间内该会话的消息直接被跳过，不调用LLM，防止token浪费",
+    "default": 120
+  },
+  "enable_auto_spam_blacklist": {
+    "description": "启用自动刷屏/图片spam检测拉黑",
+    "type": "bool",
+    "default": true,
+    "hint": "检测到同一用户在x秒内连续y次主动触发bot消息时，自动临时拉黑z分钟。同时在on_llm_request中尽早stop_event避免烧token。参考recall_cancel插件的hook使用风格。"
+  },
+  "spam_window_seconds": {
+    "description": "自动拉黑检测窗口（秒）",
+    "type": "int",
+    "hint": "在此时间窗口内统计连续主动发消息次数",
+    "default": 60
+  },
+  "spam_threshold": {
+    "description": "自动拉黑阈值（次数）",
+    "type": "int",
+    "hint": "窗口内达到此连续触发次数即自动拉黑（建议4-8）",
+    "default": 5
+  },
+  "auto_blacklist_duration_minutes": {
+    "description": "自动拉黑时长（分钟）",
+    "type": "int",
+    "hint": "检测到刷屏后自动拉黑的默认时长",
+    "default": 10
   }
 }
