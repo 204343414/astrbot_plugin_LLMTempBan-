@@ -8,7 +8,7 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 
 
-@register("astrbot_plugin_LLMTempBan", "204343414", "llm临时拉黑屏蔽工具（增强版：自动反刷屏+图片去重优化）", "2.1.0")
+@register("astrbot_plugin_LLMTempBan", "204343414", "llm临时拉黑屏蔽工具（增强版：自动反刷屏+图片去重优化）", "2.1.1")
 class BlacklistPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -34,11 +34,28 @@ class BlacklistPlugin(Star):
         self.spam_threshold = max(2, self.config.get("spam_threshold", 5))
         self.auto_blacklist_duration_minutes = self.config.get("auto_blacklist_duration_minutes", 10)
 
-        logger.info("拉黑插件初始化完成（增强版 v2.1.0）")
+        logger.info("拉黑插件初始化完成（增强版 v2.1.1）")
         logger.info(f"管理员保护列表: {self.administrators}")
         logger.info(f"默认拉黑时长: {self.default_blacklist_duration} 分钟")
         logger.info(f"已读不回冷却: {self.ignore_cooldown} 秒")
         logger.info(f"自动反刷屏: {'启用' if self.enable_auto_spam_blacklist else '禁用'} | 窗口{self.spam_window_seconds}s | 阈值{self.spam_threshold} | 自动拉黑{self.auto_blacklist_duration_minutes}min")
+
+    # ==================== 监听钩子（关键！确保插件在消息处理流程中激活） ====================
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=150)
+    async def on_all_message_listener(self, event: AstrMessageEvent):
+        """监听所有消息的钩子（监听说话/事件监听器）。
+        
+        这是为了让插件在 AstrBot 的“行为”/pipeline 视图和消息处理流程中正确注册和显示。
+        参考 recall_cancel 和官方 blacklist 插件的做法，使用 event_message_type.ALL + 高优先级。
+        
+        这里不做重逻辑（避免影响非主动消息），实际的刷屏检测、图片去重计算、自动拉黑和 stop_event 都放在 on_llm_request 中，
+        因为我们只针对“主动向bot发消息”（会触发 LLM 的那些）进行计数和拦截，防止烧 token。
+        
+        如果未来需要早期计数所有消息，可以在这里调用部分 tracker 更新逻辑。
+        """
+        # 占位：确保监听钩子存在，让插件“工作”和可见。
+        # 可选：在这里做一些超早期过滤（例如如果想对所有消息都计数），但按当前需求保留给 on_llm_request。
+        pass
 
     # ==================== 内部工具方法 ====================
 
@@ -84,7 +101,7 @@ class BlacklistPlugin(Star):
     def _get_image_identifier(self, img: Image) -> str | None:
         """获取图片唯一标识（优先file，其次url），用于同一张图片去重优化。
         这是最高效的方式：纯字符串比较，无需下载或计算哈希。
-        QQ等平台 file 字段通常已是唯一标识（即使同一图片多次发送也可能不同缓存，但跨消息重复发送同一文件时 file 常一致）。
+        QQ等平台 file 字段通常已是唯一标识。
         """
         if not img:
             return None
@@ -92,7 +109,6 @@ class BlacklistPlugin(Star):
             val = getattr(img, field, None)
             if isinstance(val, str) and val.strip():
                 cleaned = val.strip()
-                # 过滤太短或无效的
                 if len(cleaned) > 4 and (cleaned.startswith(("http", "file", "base64")) or "/" in cleaned or cleaned.startswith("[")):
                     return cleaned
         return None
@@ -100,9 +116,9 @@ class BlacklistPlugin(Star):
     def _check_and_handle_spam(self, user_id: str, event: AstrMessageEvent) -> bool:
         """检查是否触发自动刷屏拉黑。
         返回 True 表示已拦截并停止本次 LLM 调用。
-        参考 recall_cancel 的风格：尽早检测 + stop_event()。
-        只在主动触发 bot 的消息（即到达 on_llm_request）时计算，符合“主动向bot发消息”。
-        支持图片同一张简化：同一消息内相同图片只计1次基础 + 惩罚重复。
+        仅在 on_llm_request 中调用，因为只针对主动触发 bot 的消息（会到达 LLM 阶段的）。
+        参考 recall_cancel 的尽早 stop_event 风格。
+        支持图片同一张简化计数。
         """
         if not self.enable_auto_spam_blacklist:
             return False
@@ -135,11 +151,9 @@ class BlacklistPlugin(Star):
         has_dup_in_msg = num_images > num_unique > 0
 
         # spam 积分规则（简化多张相同图片）：
-        # - 基础 1 分（一条消息）
-        # - 每张独特图片 +1 分（鼓励发图但去重）
-        # - 如果本消息内有重复相同图片，额外 +1 惩罚
+        # 基础 1 + 每独特图片 +1 + 重复惩罚
         increment = 1 + num_unique + (1 if has_dup_in_msg else 0)
-        increment = min(increment, 10)  # 防止极端消息一次性加太多
+        increment = min(increment, 10)
 
         for _ in range(increment):
             tracker.append(now)
@@ -155,7 +169,7 @@ class BlacklistPlugin(Star):
                 f"窗口内积分={count} >= 阈值{self.spam_threshold} | "
                 f"本消息: 图片数={num_images} 独特={num_unique} 有重复={has_dup_in_msg} | "
                 f"拉黑 {duration} 分钟（至 {time.ctime(unblock_time)}）。"
-                f"（已参考 recall_cancel 风格尽早 stop_event 避免烧 token）"
+                f"（已参考 recall_cancel 风格在 on_llm_request 尽早 stop_event 避免烧 token）"
             )
             event.stop_event()
             return True
@@ -168,12 +182,14 @@ class BlacklistPlugin(Star):
     async def on_llm_request(
         self, event: AstrMessageEvent, req: ProviderRequest
     ):
-        """在LLM处理前拦截：黑名单检查 + 已读不回冷却 + 新增自动刷屏检测"""
+        """在LLM处理前拦截：黑名单检查 + 已读不回冷却 + 自动刷屏检测。
+        这里是核心，因为只有到达这里的才是“主动向bot发消息”会烧token的。
+        """
         self._get_bot_id(event)
         user_id = self._normalize_user_id(event.message_obj.sender.user_id)
         session_id = self._get_session_id(event)
 
-        # === 1. 自动刷屏检测（最高优先，尽早拦截） ===
+        # === 1. 自动刷屏检测（尽早拦截） ===
         if self._check_and_handle_spam(user_id, event):
             return
 
