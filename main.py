@@ -318,9 +318,13 @@ class BlacklistPluginV2(Star):
             yield event.plain_result("你没有被拉黑")
 
     # ==================== LLM 工具 ====================
-    @filter.on_llm_tool("read_and_ignore")
+    @filter.llm_tool(name="read_and_ignore")
     async def read_and_ignore(self, event: AstrMessageEvent, reason: str = "无意义发言"):
-        """已读不回工具"""
+        '''已读不回工具。
+
+        Args:
+            reason(string): 忽略原因
+        '''
         session_id = self._get_session_id(event)
         user_id = self._normalize_user_id(event.message_obj.sender.user_id)
         
@@ -338,9 +342,9 @@ class BlacklistPluginV2(Star):
         
         return "已忽略此消息。"
     
-    @filter.on_llm_tool("reset_ignore_status")
+    @filter.llm_tool(name="reset_ignore_status")
     async def reset_ignore_status(self, event: AstrMessageEvent):
-        """重置已读不回状态"""
+        '''重置已读不回状态'''
         session_id = self._get_session_id(event)
         
         if session_id in self.ignore_history:
