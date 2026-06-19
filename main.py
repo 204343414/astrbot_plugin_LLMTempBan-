@@ -11,8 +11,8 @@ import time
 from collections import deque
 
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message._components import At, Image
+from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.message_components import At, Image
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 
@@ -208,8 +208,11 @@ class BlacklistPluginV2(Star):
             text += f" - {r['time_str']} 忽略了 {r['sender_id']}（{r['reason']}）\n"
         text += "如果对方仍在骚扰，继续调用 read_and_ignore 保持沉默。"
         
-        from astrbot.core.agent.message import TextPart
-        req.extra_user_content_parts.append(TextPart(text=text).mark_as_temp())
+        try:
+            from astrbot.core.agent.message import TextPart
+            req.extra_user_content_parts.append(TextPart(text=text).mark_as_temp())
+        except Exception as e:
+            logger.debug(f"注入已读不回历史失败: {e}")
 
     # ==================== 命令处理 ====================
     @filter.command("拉黑")
