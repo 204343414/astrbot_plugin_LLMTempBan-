@@ -215,7 +215,7 @@ class BlacklistPluginV2(Star):
             logger.debug(f"注入已读不回历史失败: {e}")
 
     # ==================== 命令处理 ====================
-    @filter.command("拉黑")
+    @filter.command("拉黑_")
     async def ban_user(self, event: AstrMessageEvent, target: str = None):
         """拉黑用户（管理员）"""
         self._get_bot_id(event)
@@ -226,7 +226,7 @@ class BlacklistPluginV2(Star):
             return
         
         if not target:
-            yield event.plain_result("请指定要拉黑的用户：/拉黑 @用户")
+            yield event.plain_result("请指定要拉黑的用户：/拉黑_@用户")
             return
         
         target_id = self._extract_target_id(target)
@@ -250,7 +250,7 @@ class BlacklistPluginV2(Star):
             f"拉黑期间对方消息不会触发LLM回复"
         )
     
-    @filter.command("解禁")
+    @filter.command("解禁_")
     async def unban_user(self, event: AstrMessageEvent, target: str = None):
         """解禁用户"""
         self._get_bot_id(event)
@@ -272,7 +272,7 @@ class BlacklistPluginV2(Star):
         else:
             yield event.plain_result(f"用户 {target_id} 不在黑名单中")
     
-    @filter.command("拉黑列表")
+    @filter.command("拉黑列表_")
     async def list_banned(self, event: AstrMessageEvent):
         """查看当前拉黑列表"""
         self._get_bot_id(event)
@@ -295,7 +295,7 @@ class BlacklistPluginV2(Star):
         
         yield event.plain_result("\n".join(lines))
     
-    @filter.command("我的拉黑")
+    @filter.command("我的拉黑_")
     async def self_ban(self, event: AstrMessageEvent):
         """拉黑自己"""
         user_id = self._normalize_user_id(event.message_obj.sender.user_id)
@@ -307,7 +307,7 @@ class BlacklistPluginV2(Star):
             f"到期时间: {time.ctime(unblock_time)}"
         )
     
-    @filter.command("解除自拉黑")
+    @filter.command("解除拉黑_")
     async def self_unban(self, event: AstrMessageEvent):
         """解除自己的拉黑"""
         user_id = self._normalize_user_id(event.message_obj.sender.user_id)
