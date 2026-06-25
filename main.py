@@ -33,14 +33,15 @@ class BlacklistPluginV2(Star):
         self.temporary_blacklist = {}  # {用户ID: 解禁时间戳}
         self.permanent_ban_time = {}  # {用户ID: 拉黑时间戳}
         self.permanent_ban_last_reply = {}  # {用户ID: 上次自动回复时间戳}
-        self.ignore_history = {}
-        self.ignore_cooldown_until = {}
+        self.ignore_history = {}  # {session_id: [{time_str, sender_id, message, reason}]}
         self.spam_tracker: dict[str, deque[float]] = {}
 
         self.default_blacklist_duration = self.config.get(
             "default_blacklist_duration", 5
         )
-        self.ignore_cooldown = self.config.get("ignore_cooldown", 120)
+
+        # 已读不回历史配置
+        self.max_ignore_history = self.config.get("max_ignore_history", 20)
 
         # 自动反刷屏配置
         self.enable_auto_spam_blacklist = self.config.get(
@@ -260,19 +261,7 @@ class BlacklistPluginV2(Star):
                 self.permanent_ban_last_reply.pop(user_id, None)
                 logger.info(f"[LLMTempBan] 用户 {user_id} 拉黑已过期")
 
-        # === 已读不回冷却检查 ===
-        if session_id in self.ignore_cooldown_until:
-            remaining = self.ignore_cooldown_until[session_id] - time.time()
-            if remaining > 0:
-                logger.info(
-                    f"[LLMTempBan] 已读不回冷却中 session={session_id} 剩余 {remaining:.0f}s"
-                )
-                event.stop_event()
-                return
-            else:
-                del self.ignore_cooldown_until[session_id]
-
-        # 注入已读不回历史
+        # 注入已读不回历史（按次数累积，让 LLM 自己决定是否继续潜水）
         self._inject_ignore_history(session_id, req)
 
     def _inject_ignore_history(self, session_id, req: ProviderRequest):
@@ -280,13 +269,18 @@ class BlacklistPluginV2(Star):
         if session_id not in self.ignore_history or not self.ignore_history[session_id]:
             return
 
-        history = self.ignore_history[session_id][-5:]
+        history = self.ignore_history[session_id][-self.max_ignore_history:]
         text = (
-            f"\n\n[已读不回记录] 你在本会话已执行 {len(self.ignore_history[session_id])} 次已读不回。\n"
+            f"\n\n[已读不回记录] 你在本会话已执行 {len(self.ignore_history[session_id])} 次已读不回。"
+            f"以下是对方此前发送的消息记录，请判断是否仍在重复骚扰/无意义发言。\n"
         )
-        for r in history:
-            text += f" - {r['time_str']} 忽略了 {r['sender_id']}（{r['reason']}）\n"
-        text += "如果对方仍在骚扰，继续调用 read_and_ignore 保持沉默。"
+        for idx, r in enumerate(history, start=1):
+            msg = r.get("message", "")[:200]
+            text += f"{idx}. [{r['time_str']}] 用户 {r['sender_id']}：{msg}（原因：{r['reason']}）\n"
+        text += (
+            "\n如果以上记录显示对方仍在重复/无意义骚扰，请继续调用 read_and_ignore 保持沉默。"
+            "如果情况已变化或需要回应，请直接回复。"
+        )
 
         try:
             from astrbot.core.agent.message import TextPart
@@ -412,13 +406,19 @@ class BlacklistPluginV2(Star):
     @filter.command("拉黑_")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def ban_user_cmd(self, event: AstrMessageEvent, target: str = None):
-        """拉黑用户（仅管理员）。可指定时长，如 /拉黑_ @123456 60，或 /拉黑_ @123456 -1 永久拉黑。"""
-        if not target:
+        """拉黑用户（仅管理员）。用法：/拉黑_ @用户 [时长分钟，默认5，-1永久]"""
+        # 从完整命令文本解析，避免 AstrBot 对 target 参数的类型/分词处理不一致
+        text = event.message_str.strip()
+        for prefix in ("/拉黑_", "拉黑_"):
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
+                break
+
+        if not text:
             yield event.plain_result("请指定要拉黑的用户：/拉黑_ @用户 [时长分钟，默认5，-1永久]")
             return
 
-        # 拆分目标与时长，例如 "@123456 60" 或 "123456 -1"
-        parts = target.split()
+        parts = text.split()
         target_part = parts[0]
         duration = self.default_blacklist_duration
         if len(parts) > 1:
@@ -432,24 +432,27 @@ class BlacklistPluginV2(Star):
             yield event.plain_result("无法识别目标用户")
             return
 
-        if event.is_admin():
-            # 命令调用者肯定已经是管理员（permission_type），但防御性再判断一次
-            result = await self._ban_user(
-                target_id, duration, caller="admin_cmd", reason="管理员命令拉黑"
-            )
-            yield event.plain_result(result)
-        else:
-            yield event.plain_result("只有管理员可以使用此命令")
+        result = await self._ban_user(
+            target_id, duration, caller="admin_cmd", reason="管理员命令拉黑"
+        )
+        yield event.plain_result(result)
 
     @filter.command("解禁_")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def unban_user_cmd(self, event: AstrMessageEvent, target: str = None):
         """解禁用户（仅管理员）"""
-        if not target:
+        # 从完整命令文本解析，允许 /@用户 后面跟多余参数
+        text = event.message_str.strip()
+        for prefix in ("/解禁_", "解禁_"):
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
+                break
+
+        if not text:
             yield event.plain_result("请指定要解禁的用户：/解禁_ @用户")
             return
 
-        target_id = self._extract_target_id(target)
+        target_id = self._extract_target_id(text.split()[0])
         if target_id in self.temporary_blacklist:
             del self.temporary_blacklist[target_id]
             self.permanent_ban_time.pop(target_id, None)
@@ -520,7 +523,7 @@ class BlacklistPluginV2(Star):
 
     @filter.llm_tool(name="read_and_ignore")
     async def read_and_ignore(self, event: AstrMessageEvent, reason: str = "无意义发言"):
-        '''已读不回工具。
+        '''已读不回工具。调用后会记录本次用户消息，下次 LLM 会看到累计历史并决定是否继续潜水。
 
         Args:
             reason(string): 忽略原因
@@ -535,26 +538,30 @@ class BlacklistPluginV2(Star):
             {
                 "time_str": time.strftime("%Y-%m-%d %H:%M"),
                 "sender_id": user_id,
+                "message": event.message_str or "",
                 "reason": reason,
             }
         )
 
-        self.ignore_cooldown_until[session_id] = time.time() + self.ignore_cooldown
-        logger.info(f"[LLMTempBan] 已读不回 session={session_id}")
+        # 限制历史长度，防止无限增长
+        if len(self.ignore_history[session_id]) > self.max_ignore_history:
+            self.ignore_history[session_id] = self.ignore_history[session_id][
+                -self.max_ignore_history :
+            ]
 
-        return "已忽略此消息。"
+        logger.info(f"[LLMTempBan] 已读不回 session={session_id} 次数={len(self.ignore_history[session_id])}")
+
+        return "已忽略此消息，并记录到已读不回历史中。"
 
     @filter.llm_tool(name="reset_ignore_status")
     async def reset_ignore_status(self, event: AstrMessageEvent):
-        '''重置已读不回状态'''
+        '''重置已读不回状态，清空累计历史记录。'''
         session_id = self._get_session_id(event)
 
         if session_id in self.ignore_history:
             del self.ignore_history[session_id]
-        if session_id in self.ignore_cooldown_until:
-            del self.ignore_cooldown_until[session_id]
 
-        return "已重置状态。"
+        return "已清空已读不回历史。"
 
     # ==================== 工具方法 ====================
     def _ensure_message_list(self, value) -> list[str]:
