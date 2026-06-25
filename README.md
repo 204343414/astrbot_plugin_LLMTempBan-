@@ -1,86 +1,125 @@
-# astrbot_plugin_LLMTempBan（增强版 v2.1.0）
+# astrbot_plugin_LLMTempBan（增强版 v2.4.0）
 
-一个为 AstrBot 设计的 LLM 临时拉黑屏蔽插件，支持管理员拉黑、普通用户自助拉黑、反拉黑保护、已读不回功能，以及**新增自动刷屏/图片spam检测**，有效防止 Bot 与 Bot 之间无限循环对话，以及傻13无脑发图烧AI token。
+一个为 AstrBot 设计的 LLM 临时拉黑屏蔽插件，核心目的是 **防刷屏、防恶俗、防止用户诱导 Bot 发送敏感内容**。支持 AstrBot 自带的管理员权限体系，提供管理员拉黑、已读不回、自动刷屏/图片 spam 检测、永久拉黑自定义语录、QQ 好友检测与自动删除好友等功能。
 
-> **参考了 [astrbot_plugin_recall_cancel](https://github.com/muyouzhi6/astrbot_plugin_recall_cancel) 的代码风格和钩子使用**（on_llm_request 尽早拦截 + stop_event() + 日志），先查阅了 AstrBot wiki（plugin-new、listen-message-event、event hooks 如 on_llm_request / on_llm_response / event_message_type.ALL 等）和官方示例确认兼容性，无问题后再实现。所有钩子使用默认或合理优先级，不会干扰其他插件。
+> 参考了 [astrbot_plugin_recall_cancel](https://github.com/muyouzhi6/astrbot_plugin_recall_cancel) 的代码风格和钩子使用（on_llm_request 尽早拦截 + stop_event() + 日志），并查阅 AstrBot wiki 和官方示例确认兼容性。所有钩子使用合理优先级，不会干扰其他插件。
 
 ## ✨ 功能概览
 
-### 🚫 临时拉黑（原有 + 增强）
-- **管理员拉黑**：管理员可通过 @目标用户 将其临时拉黑，被拉黑用户在指定时间内无法触发 LLM 回复
-- **普通用户自助拉黑**：普通用户可以拉黑自己（适用于主动屏蔽 Bot 回复的场景）
-- **反拉黑保护**：普通用户尝试拉黑管理员时，会被反向拉黑自己，时长至少 5 分钟
-- **Bot 自动拉黑**：Bot 可自动拉黑违规用户，管理员不受自动拉黑限制
-- **自动过期清理**：拉黑到期后自动解除，无需手动操作
-- **新增：自动刷屏检测**：一旦检测到同一用户在 **x秒内连续 y次主动向bot发消息**（仅统计到达 on_llm_request 的“主动”触发，即私聊或群@唤醒等），自动触发拉黑 **z分钟**。
-  - 触发后**立即 event.stop_event() 撤销 LLM 调用**，避免烧 token（参考 recall_cancel 风格尽早拦截）。
-  - **持续发消息就继续增大拉黑时间**（惩罚机制，像加数值的按钮玩具）。
-  - 仅对非管理员生效。
+### 🚫 防刷屏自动拉黑
 
-### 📖 已读不回（原有）
-- **LLM 主动调用**：Bot 判断无需回复时，可调用 `read_and_ignore` 工具实现真正的已读不回，不发送任何消息
-- **历史记录注入**：每次已读不回操作会被记录，下次 Bot 被触发时会在系统提示中看到历史记录，帮助其判断是否继续保持沉默
-- **防 Bot 互聊死循环**：当两个 Bot 陷入无意义的循环客套时，Bot 能识别并主动终止对话
+- 检测到同一用户在 **x秒内连续 y次主动向 Bot 发消息**（私聊），自动触发拉黑 **z分钟**。
+- 触发后 **立即 `event.stop_event()` 撤销 LLM 调用**，避免烧 token。
+- 持续发消息会延长拉黑时间（惩罚机制）。
+- 同一图片重复发送会额外加速触发。
+- 仅对非管理员生效。
 
-### 🖼️ 图片同一张优化（新增）
-- **算法优化**：同一消息内相同图片直接**简化计数**（使用 file/url 字段做高效字符串 key 去重，无需下载/哈希，最高效）。
-  - 本消息内有重复相同图片 → 额外惩罚积分（加速触发自动拉黑）。
-  - 跨消息重复发同一张图片 → 正常累积窗口计数（聊天里不会“显示”第二次的感觉，简化处理）。
-- 发图 spam 会被更快检测到（独特图片越多积分越高 + 重复惩罚）。
+### 🛠️ 管理员拉黑工具 / 命令
+
+- **LLM 工具 `ban_user`**：管理员可直接让 LLM 调用，拉黑指定用户，支持 `duration_minutes=-1` 永久拉黑。
+- **命令 `/拉黑_ @用户 [时长]`**：管理员手动拉黑，时长默认 5 分钟，`-1` 表示永久。
+- **命令 `/解禁_ @用户`**：管理员手动解禁。
+- **命令 `/拉黑列表_`**：管理员查看当前黑名单。
+- 管理员判定完全使用 **AstrBot 自带的管理员体系**（`admins_id`），插件不再维护独立的管理员名单。
+
+### 🗣️ 永久拉黑自定义语录
+
+- 当用户被 **永久拉黑** 后，每次尝试触发 Bot 时，如果距离上次自动回复超过配置间隔（默认 1 小时），Bot 会随机抽取一条自定义语录发回给他。
+- 语录可在 WebUI 或 JSON 配置中编辑，支持列表随机抽取。
+- 支持 **好友专用语录**：如果目标是 Bot 的 QQ 好友，可配置单独的语录池。
+- 支持模板变量：
+  - `{user_id}`：被拉黑用户 ID
+  - `{duration}`：拉黑时长（永久时显示 `永久`）
+  - `{ban_time}`：拉黑开始时间，如 `2026-06-25 14:30`
+- 默认内置几条阴阳怪气语录，例如：
+  - `您已被拉黑 {user_id}，已拉黑 {duration}。`
+  - `被拉黑还锲而不舍地戳 Bot，建议输入 /删除bot 或自行删除 Bot 好友，对大家都好~`
+  - `您已被永久拉黑，请继续表演，反正 Bot 不会再理你了。`
+  - `黑名单里的空气还好吗？{user_id} 同学。`
+  - `低质量骚扰已触发永久屏蔽，您已收获 Bot 的沉默大礼包。`
+
+### 👤 好友检测与自动删除好友（参考 HappyBirthday 插件）
+
+- 检测被永久拉黑的目标是否为 Bot 的 QQ 好友。
+- 配置项 `auto_delete_friend_on_permanent_ban` 默认关闭；开启后，永久拉黑好友时会自动调用 OneBot 接口删除好友。
+- 非好友用户只执行永久拉黑，不会尝试删除好友。
+- 适配器主要面向 **aiocqhttp / OneBot 协议端**（NapCat、LLOneBot、go-cqhttp 等），如协议端不支持 `delete_friend` 会自动跳过并记录日志。
+
+### 🚫 全局命令拦截
+
+- 被拉黑用户发送的任何消息（包括 `/` 命令、@Bot、私聊等）都会在最早阶段被 `stop_event()` 拦截。
+- 这意味着被拉黑者无法再用 `/draw` 等画图命令或其他插件指令继续骚扰 Bot。
+- 永久拉黑用户被拦截时，仍会按间隔收到自定义语录。
+
+### 📖 已读不回
+
+- Bot 判断无需回复时，可调用 `read_and_ignore` 工具实现真正的已读不回，不发送任何消息。
+- 每次已读不回操作会被记录，下次 Bot 被触发时会在系统提示中注入历史记录，帮助其判断是否继续保持沉默。
+- 适用于防 Bot 互聊死循环、无意义回复、图片 spam 等场景。
 
 ## 🔧 配置项（WebUI 可调）
 
-在 AstrBot Web 面板中配置以下参数（新增了完整 schema）：
+在 AstrBot Web 面板中配置以下参数：
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `administrators` | list | `[]` | 管理员用户 ID 列表，管理员不受拉黑和已读不回限制 |
 | `default_blacklist_duration` | int | `5` | 默认拉黑时长（分钟） |
 | `ignore_cooldown` | int | `120` | 已读不回冷却时间（秒） |
 | `enable_auto_spam_blacklist` | bool | `true` | 是否启用自动刷屏检测 |
 | `spam_window_seconds` | int | `60` | 检测连续发消息的时间窗口（秒） |
 | `spam_threshold` | int | `5` | 窗口内达到此连续次数即自动拉黑 |
 | `auto_blacklist_duration_minutes` | int | `10` | 自动检测触发的拉黑时长（分钟） |
+| `permanent_ban_messages` | list | 见上 | 永久拉黑自动回复语录列表，支持模板变量 |
+| `friend_permanent_ban_messages` | list | `[]` | 好友专用永久拉黑语录，为空则使用通用语录 |
+| `permanent_ban_reply_interval` | int | `3600` | 永久拉黑自动回复间隔（秒），默认 1 小时 |
+| `auto_delete_friend_on_permanent_ban` | bool | `false` | 永久拉黑好友时是否自动删除好友（默认关闭） |
+| `friend_list_refresh_interval` | int | `3600` | 好友列表缓存刷新间隔（秒） |
 
-> Bot 首次收到消息时会自动将自身 ID 加入管理员列表并持久化保存。
+> 管理员身份由 AstrBot 全局配置 `admins_id` 决定，插件不再单独维护管理员名单。请在 AstrBot WebUI 的「系统设置」或 `cmd_config.json` 中配置管理员 ID。
 
 ## 🛠️ LLM 工具说明
 
-### `add_temporary_blacklist`
-拉黑工具，LLM 根据对话上下文判断并调用：
+### `ban_user`
 
-- 管理员调用：拉黑 @指定的目标用户
-- 普通用户调用：仅能拉黑自己，尝试拉黑管理员会被反向拉黑
-- 可指定 `duration_minutes` 参数自定义时长
+拉黑指定用户，**仅管理员可调用**。
+
+- 参数 `target_user_id`：目标用户 ID（群聊中也可通过 @ 目标自动识别，但建议填写）。
+- 参数 `duration_minutes`：拉黑时长（分钟），`-1` 表示永久拉黑，默认永久。
+- 参数 `reason`：拉黑原因，可选。
+
+示例参数：
+
+```json
+{
+  "target_user_id": "123456789",
+  "duration_minutes": -1,
+  "reason": "恶俗骚扰"
+}
+```
 
 ### `read_and_ignore`
+
 已读不回工具，适用场景：
 
 - 对方可能是另一个机器人，双方陷入无意义的循环对话
-- 对方反复发送相似、重复、无意义的内容（含图片spam）
+- 对方反复发送相似、重复、无意义的内容（含图片 spam）
 - 当前对话已自然结束，继续回复只会没完没了
 - 对方的消息确实不需要任何回应
 
-调用时可传入 `reason` 参数记录原因，每个会话保留最近 50 条历史记录。
+调用时可传入 `reason` 参数记录原因。
 
 ### `reset_ignore_status`
+
 重置已读不回状态。
 
 ## 📋 权限逻辑
 
-```
-管理员：
-  ├── 不受拉黑限制
-  ├── 不受已读不回影响
-  ├── 可拉黑任意非管理员用户
-  └── 不会被自动拉黑
-
-普通用户：
-  ├── 可拉黑自己
-  ├── 不能拉黑其他普通用户
-  └── 尝试拉黑管理员 → 反向拉黑自己
-  └── 刷屏 → 自动拉黑（可延长）
-```
+- **管理员**：不受拉黑、已读不回、自动刷屏限制；可调用 `ban_user` 工具或 `/拉黑_` 命令拉黑任意用户（含永久）。
+- **普通用户**：
+  - 无法调用拉黑工具或命令；
+  - 刷屏会被自动拉黑；
+  - 被拉黑后，所有消息（含 `/` 命令）都会被拦截；
+  - 永久拉黑后会按间隔收到自定义语录。
 
 ## 📦 安装 & 更新
 
@@ -91,25 +130,38 @@
 ## 🧪 本地测试 & 兼容性确认
 
 - 参考 AstrBot 官方 wiki：
-  - https://docs.astrbot.app/dev/star/plugin-new.html
-  - https://docs.astrbot.app/dev/star/guides/listen-message-event.html （event hooks、on_llm_request、stop_event、priority 等）
+  - [https://docs.astrbot.app/dev/star/plugin-new.html](https://docs.astrbot.app/dev/star/plugin-new.html)
+  - [https://docs.astrbot.app/dev/star/guides/listen-message-event.html](https://docs.astrbot.app/dev/star/guides/listen-message-event.html)
   - 官方黑名单插件示例、recall_cancel 源码
-- 确认使用 `@filter.on_llm_request()` 是安全的（当前插件已在用，官方 pipeline 支持多个 hook 顺序执行）。
-- 使用 `event.stop_event()` 阻止 LLM 调用和后续处理，符合 recall_cancel / 官方 blacklist 插件实践。
-- 图片处理使用现有 message_components.Image，无额外依赖。
+- 管理员判定使用 `event.is_admin()`，与 AstrBot 自带 `admins_id` 保持一致。
+- 命令使用 `@filter.permission_type(filter.PermissionType.ADMIN)` 由 AstrBot 统一鉴权。
+- 使用 `event.stop_event()` 阻止 LLM 调用和后续处理，符合 recall_cancel / 官方黑名单插件实践。
+- 在 on_llm_request 钩子中如需发送消息，使用 `event.send()` 直接发送（官方文档明确说明钩子中不能 yield）。
+- 图片处理使用现有 `message_components.Image`，无额外依赖。
 - 支持多平台（aiocqhttp 等），spam 检测通用。
-- 所有修改均为向后兼容增强。
 
 有问题欢迎提 issue 或 PR。
 
-## 变更日志 (v2.1.0)
+## 变更日志
 
-- 新增自动刷屏检测 + 图片去重 spam 优化（结合用户需求 + recall_cancel 参考）
-- 支持窗口内连续 y 次 x 秒自动拉黑 z 分钟 + 持续发延长惩罚
-- 触发时尽早 stop_event 撤销 LLM
-- 完善 _conf_schema.json、metadata、README
-- 最高效图片 key 算法（file/url 字符串匹配 + 单消息去重简化）
-- 控制台详细日志（无用户通知，静默拉黑）
+### v2.4.0
+
+- 改用 AstrBot 自带管理员体系（`event.is_admin()` / `filter.PermissionType.ADMIN`），移除插件内 `administrators` 配置。
+- LLM 工具改名为 `ban_user`，默认永久拉黑，描述更清晰，避免 LLM 误解为仅临时拉黑。
+- 移除普通用户自助拉黑、反拉黑保护等非核心功能。
+- 新增永久拉黑自定义自动回复语录：支持列表随机抽取、模板变量、可配置回复间隔（默认 1 小时）。
+- 新增好友检测：参考 HappyBirthday 插件，可检测被永久拉黑目标是否为 Bot 好友；开启 `auto_delete_friend_on_permanent_ban` 后可自动删除好友（默认关闭）。
+- 新增好友专用永久拉黑语录 `friend_permanent_ban_messages`。
+- 被拉黑用户（含永久/临时）的所有消息都会被全局拦截，包括 `/` 命令。
+- 修复原 `_get_image_identifier` 缩进问题，提升稳定性。
+- 完善 `_conf_schema.json` 与 `metadata.yaml`，版本统一为 v2.4.0。
+
+### v2.1.0
+
+- 新增自动刷屏检测 + 图片去重 spam 优化。
+- 支持窗口内连续 y 次 x 秒自动拉黑 z 分钟 + 持续发延长惩罚。
+- 触发时尽早 stop_event 撤销 LLM。
+- 完善 `_conf_schema.json`、metadata、README。
 
 ## License
 
