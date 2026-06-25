@@ -2,7 +2,7 @@
 LLMTempBan 增强版 v2.4 - 支持 LLM 工具拉黑、永久拉黑与自定义拉黑语录
 
 核心目标：
-1. 通过 LLM 工具 add_temporary_blacklist 实现灵活拉黑（5 分钟 ~ 永久）
+1. 通过 LLM 工具 ban_user 实现灵活拉黑（5 分钟 ~ 永久）
 2. 永久拉黑用户触发 Bot 时，按配置间隔自动回复自定义语录（默认 1 小时一次）
 3. 确保 stop_event() 能真正阻止消息触发 LLM 调用，避免烧 token
 4. 临时黑名单到点自动解除
@@ -36,9 +36,6 @@ class BlacklistPluginV2(Star):
         self.ignore_history = {}
         self.ignore_cooldown_until = {}
         self.spam_tracker: dict[str, deque[float]] = {}
-
-        self.administrators = self.config.get("administrators", [])
-        self.bot_id = ""
 
         self.default_blacklist_duration = self.config.get(
             "default_blacklist_duration", 5
@@ -95,7 +92,6 @@ class BlacklistPluginV2(Star):
 
         logger.info("=" * 60)
         logger.info("拉黑插件 v2.4.0 初始化完成")
-        logger.info(f"管理员列表: {self.administrators}")
         logger.info(f"自动拉黑阈值: {self.spam_threshold}条/{self.spam_window_seconds}秒")
         logger.info(f"拉黑时长: {self.auto_blacklist_duration_minutes}分钟")
         logger.info(f"永久拉黑回复间隔: {self.permanent_ban_reply_interval}秒")
@@ -112,7 +108,7 @@ class BlacklistPluginV2(Star):
         user_id = self._normalize_user_id(event.message_obj.sender.user_id)
 
         # 保护管理员：管理员不受任何拉黑限制
-        if self._is_protected(user_id):
+        if event.is_admin():
             return
 
         # === 检查是否已在黑名单中 ===
@@ -226,11 +222,12 @@ class BlacklistPluginV2(Star):
         LLM请求前的最终拦截点。
         这是防止消息触发LLM的最后一道防线。
         """
-        # 初始化bot_id
-        self._get_bot_id(event)
-
         user_id = self._normalize_user_id(event.message_obj.sender.user_id)
         session_id = self._get_session_id(event)
+
+        # 保护管理员
+        if event.is_admin():
+            return
 
         # === 最终黑名单检查 ===
         if user_id in self.temporary_blacklist:
@@ -409,53 +406,47 @@ class BlacklistPluginV2(Star):
         return False
 
     # ==================== 命令处理 ====================
+
+
+    # ==================== 命令处理（仅管理员） ====================
     @filter.command("拉黑_")
-    async def ban_user(self, event: AstrMessageEvent, target: str = None):
-        """拉黑用户（管理员）"""
-        self._get_bot_id(event)
-        user_id = self._normalize_user_id(event.message_obj.sender.user_id)
-
-        if not self._is_protected(user_id):
-            yield event.plain_result("只有管理员可以使用此命令")
-            return
-
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def ban_user_cmd(self, event: AstrMessageEvent, target: str = None):
+        """拉黑用户（仅管理员）。可指定时长，如 /拉黑_ @123456 60，或 /拉黑_ @123456 -1 永久拉黑。"""
         if not target:
-            yield event.plain_result("请指定要拉黑的用户：/拉黑_@用户")
+            yield event.plain_result("请指定要拉黑的用户：/拉黑_ @用户 [时长分钟，默认5，-1永久]")
             return
 
-        target_id = self._extract_target_id(target)
+        # 拆分目标与时长，例如 "@123456 60" 或 "123456 -1"
+        parts = target.split()
+        target_part = parts[0]
+        duration = self.default_blacklist_duration
+        if len(parts) > 1:
+            try:
+                duration = int(parts[1])
+            except ValueError:
+                pass
+
+        target_id = self._extract_target_id(target_part)
         if not target_id:
             yield event.plain_result("无法识别目标用户")
             return
 
-        if self._is_protected(target_id):
-            yield event.plain_result("无法拉黑管理员")
-            return
-
-        duration = self.default_blacklist_duration
-        unblock_time = time.time() + duration * 60
-        self.temporary_blacklist[target_id] = unblock_time
-
-        logger.warning(f"[LLMTempBan] 管理员 {user_id} 拉黑用户 {target_id} {duration} 分钟")
-
-        yield event.plain_result(
-            f"已拉黑用户 {target_id} {duration} 分钟\n"
-            f"到期时间: {time.ctime(unblock_time)}\n"
-            f"拉黑期间对方消息不会触发LLM回复"
-        )
+        if event.is_admin():
+            # 命令调用者肯定已经是管理员（permission_type），但防御性再判断一次
+            result = await self._ban_user(
+                target_id, duration, caller="admin_cmd", reason="管理员命令拉黑"
+            )
+            yield event.plain_result(result)
+        else:
+            yield event.plain_result("只有管理员可以使用此命令")
 
     @filter.command("解禁_")
-    async def unban_user(self, event: AstrMessageEvent, target: str = None):
-        """解禁用户"""
-        self._get_bot_id(event)
-        user_id = self._normalize_user_id(event.message_obj.sender.user_id)
-
-        if not self._is_protected(user_id):
-            yield event.plain_result("只有管理员可以使用此命令")
-            return
-
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def unban_user_cmd(self, event: AstrMessageEvent, target: str = None):
+        """解禁用户（仅管理员）"""
         if not target:
-            yield event.plain_result("请指定要解禁的用户")
+            yield event.plain_result("请指定要解禁的用户：/解禁_ @用户")
             return
 
         target_id = self._extract_target_id(target)
@@ -463,16 +454,15 @@ class BlacklistPluginV2(Star):
             del self.temporary_blacklist[target_id]
             self.permanent_ban_time.pop(target_id, None)
             self.permanent_ban_last_reply.pop(target_id, None)
-            logger.info(f"[LLMTempBan] 管理员 {user_id} 解禁用户 {target_id}")
+            logger.info(f"[LLMTempBan] 管理员解禁用户 {target_id}")
             yield event.plain_result(f"已解禁用户 {target_id}")
         else:
             yield event.plain_result(f"用户 {target_id} 不在黑名单中")
 
     @filter.command("拉黑列表_")
-    async def list_banned(self, event: AstrMessageEvent):
-        """查看当前拉黑列表"""
-        self._get_bot_id(event)
-
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def list_banned_cmd(self, event: AstrMessageEvent):
+        """查看当前拉黑列表（仅管理员）"""
         if not self.temporary_blacklist:
             yield event.plain_result("当前没有拉黑用户 ✅")
             return
@@ -495,48 +485,25 @@ class BlacklistPluginV2(Star):
 
         yield event.plain_result("\n".join(lines))
 
-    @filter.command("我的拉黑_")
-    async def self_ban(self, event: AstrMessageEvent):
-        """拉黑自己"""
-        user_id = self._normalize_user_id(event.message_obj.sender.user_id)
-        duration = self.default_blacklist_duration
-        unblock_time = time.time() + duration * 60
-        self.temporary_blacklist[user_id] = unblock_time
-        yield event.plain_result(
-            f"已拉黑自己 {duration} 分钟\n" f"到期时间: {time.ctime(unblock_time)}"
-        )
-
-    @filter.command("解除拉黑_")
-    async def self_unban(self, event: AstrMessageEvent):
-        """解除自己的拉黑"""
-        user_id = self._normalize_user_id(event.message_obj.sender.user_id)
-        if user_id in self.temporary_blacklist:
-            del self.temporary_blacklist[user_id]
-            self.permanent_ban_time.pop(user_id, None)
-            self.permanent_ban_last_reply.pop(user_id, None)
-            yield event.plain_result("已解除自拉黑")
-        else:
-            yield event.plain_result("你没有被拉黑")
-
     # ==================== LLM 工具 ====================
-    @filter.llm_tool(name="add_temporary_blacklist")
-    async def add_temporary_blacklist(
+    @filter.llm_tool(name="ban_user")
+    async def ban_user_tool(
         self,
         event: AstrMessageEvent,
-        duration_minutes: int,
-        target_user_id: str = "",
+        target_user_id: str,
+        duration_minutes: int = -1,
         reason: str = "",
     ):
-        '''拉黑工具。管理员可拉黑任意非管理员用户；普通用户只能拉黑自己；尝试拉黑管理员会被反向拉黑。
-        duration_minutes=-1 表示永久拉黑。消息中带 @ 时优先以 @ 目标为准。
+        '''拉黑指定用户。仅管理员可调用。duration_minutes=-1 表示永久拉黑，其他正整数表示临时拉黑分钟数。
 
         Args:
-            duration_minutes(int): 拉黑时长（分钟），-1 表示永久拉黑
-            target_user_id(string): 目标用户 ID，可选；群聊中如消息 @ 了用户则优先使用 @ 目标
+            target_user_id(string): 要拉黑的用户 ID（群聊中也可通过 @ 目标自动识别，但建议填写）
+            duration_minutes(int): 拉黑时长（分钟），-1 表示永久拉黑，默认永久
             reason(string): 拉黑原因，可选
         '''
-        self._get_bot_id(event)
-        caller_id = self._normalize_user_id(event.message_obj.sender.user_id)
+        # 仅管理员可调用 LLM 拉黑工具
+        if not event.is_admin():
+            return "无权使用：只有 AstrBot 管理员才能调用拉黑工具。"
 
         # 优先从消息链的 @ 组件提取目标
         at_target = self._extract_at_target_from_event(event)
@@ -545,33 +512,10 @@ class BlacklistPluginV2(Star):
         elif target_user_id:
             target_id = self._normalize_user_id(target_user_id)
         else:
-            target_id = caller_id
-
-        # 管理员权限：必须明确指定目标（@ 或 target_user_id）
-        if self._is_protected(caller_id):
-            if not at_target and not target_user_id:
-                return "请指定要拉黑的目标用户（@ 目标或提供 target_user_id）。"
-            if self._is_protected(target_id):
-                return f"无法拉黑管理员 {target_id}。"
-
-            return await self._ban_user(
-                target_id, duration_minutes, caller=caller_id, reason=reason
-            )
-
-        # 普通用户只能拉黑自己
-        if target_id != caller_id:
-            if self._is_protected(target_id):
-                # 尝试拉黑管理员 → 反向拉黑自己，至少 5 分钟
-                return await self._ban_user(
-                    caller_id,
-                    max(5, duration_minutes if duration_minutes > 0 else 5),
-                    caller="system",
-                    reason="尝试拉黑管理员，被反向拉黑",
-                )
-            return "普通用户只能拉黑自己，无法拉黑其他用户。"
+            return "请指定要拉黑的目标用户（@ 目标或提供 target_user_id）。"
 
         return await self._ban_user(
-            caller_id, duration_minutes, caller=caller_id, reason=reason
+            target_id, duration_minutes, caller="admin_llm", reason=reason
         )
 
     @filter.llm_tool(name="read_and_ignore")
@@ -647,7 +591,7 @@ class BlacklistPluginV2(Star):
 
         log_reason = f" 原因: {reason}" if reason else ""
         logger.warning(
-            f"[LLMTempBan] 管理员/LLM {caller} 拉黑用户 {target_id} {duration_text}{log_reason}"
+            f"[LLMTempBan] 管理员 {caller} 拉黑用户 {target_id} {duration_text}{log_reason}"
         )
 
         extra_text = ""
@@ -677,15 +621,6 @@ class BlacklistPluginV2(Star):
             f"拉黑期间对方消息不会触发 LLM 回复。"
         )
 
-    def _get_bot_id(self, event: AstrMessageEvent):
-        if not self.bot_id:
-            self.bot_id = self._normalize_user_id(event.message_obj.self_id)
-            if self.bot_id not in self.administrators:
-                self.administrators.append(self.bot_id)
-                self.config["administrators"] = self.administrators
-                self.config.save_config()
-        return self.bot_id
-
     def _get_session_id(self, event: AstrMessageEvent):
         if hasattr(event, "session_id") and event.session_id:
             return str(event.session_id)
@@ -697,9 +632,6 @@ class BlacklistPluginV2(Star):
         elif isinstance(user_id, str):
             return user_id.split("_")[-1].strip()
         return str(user_id)
-
-    def _is_protected(self, user_id):
-        return user_id in self.administrators
 
     def _extract_at_target_from_event(self, event: AstrMessageEvent) -> str:
         """从消息链中的 At 组件提取目标用户 ID"""
