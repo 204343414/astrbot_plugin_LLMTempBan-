@@ -40,5 +40,41 @@
     "type": "int",
     "hint": "检测到刷屏后自动拉黑的默认时长",
     "default": 10
+  },
+  "permanent_ban_messages": {
+    "description": "永久拉黑用户的自动回复语录列表（支持模板变量）",
+    "type": "list",
+    "hint": "被永久拉黑的用户再次触发 Bot 时，会每隔 'permanent_ban_reply_interval' 秒随机抽取一条发送。可用模板变量：{user_id} 用户ID、{duration} 拉黑时长（永久时显示'永久'）、{ban_time} 拉黑时间（如 2026-06-25 14:30）。",
+    "default": [
+      "您已被拉黑 {user_id}，已拉黑 {duration}。",
+      "被拉黑还锲而不舍地戳 Bot，建议输入 /删除bot 或自行删除 Bot 好友，对大家都好~",
+      "您已被永久拉黑，请继续表演，反正 Bot 不会再理你了。",
+      "黑名单里的空气还好吗？{user_id} 同学。",
+      "低质量骚扰已触发永久屏蔽，您已收获 Bot 的沉默大礼包。"
+    ]
+  },
+  "friend_permanent_ban_messages": {
+    "description": "【可选】好友专用永久拉黑语录列表（为空则使用通用语录）",
+    "type": "list",
+    "hint": "如果目标用户是 Bot 的 QQ 好友，且被永久拉黑，会优先使用这里的语录；为空则使用上面的通用语录。支持同样的模板变量。",
+    "default": []
+  },
+  "permanent_ban_reply_interval": {
+    "description": "永久拉黑自动回复间隔（秒）",
+    "type": "int",
+    "hint": "被永久拉黑的用户每次触发 Bot 后，至少要间隔这么多秒才会再次收到自动回复语录。默认 3600 秒 = 1 小时。",
+    "default": 3600
+  },
+  "auto_delete_friend_on_permanent_ban": {
+    "description": "永久拉黑好友时是否自动删除好友（参考 HappyBirthday 插件的好友列表检测）",
+    "type": "bool",
+    "hint": "开启后，当管理员/LLM 永久拉黑的目标用户是 Bot 的 QQ 好友时，会自动调用 OneBot 接口删除好友。默认关闭，请确认你的协议端支持 delete_friend 再开启。",
+    "default": false
+  },
+  "friend_list_refresh_interval": {
+    "description": "好友列表缓存刷新间隔（秒）",
+    "type": "int",
+    "hint": "检测用户是否为 Bot 好友时，会缓存好友列表并按此间隔刷新。默认 3600 秒 = 1 小时。",
+    "default": 3600
   }
 }
