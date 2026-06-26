@@ -29,12 +29,24 @@
     "hint": "窗口内达到此连续触发次数即自动拉黑（建议4-8）",
     "default": 5
   },
-  "auto_blacklist_duration_minutes": {
-    "description": "自动拉黑时长（分钟）",
-    "type": "int",
-    "hint": "检测到刷屏后自动拉黑的默认时长",
-    "default": 10
-  },
+    "auto_blacklist_duration_minutes": {
+        "description": "自动拉黑时长（分钟）",
+        "type": "int",
+        "hint": "检测到刷屏后自动拉黑的默认时长",
+        "default": 10
+    },
+    "ban_history_inject_threshold": {
+        "description": "拉黑历史注入阈值（次数）",
+        "type": "int",
+        "hint": "当某用户累计被拉黑达到此次数后，其下次触发 LLM 时会把历史拉黑理由注入到上下文中，让 Bot 自行判断是否需要再次拉黑或永久拉黑（通过 ban_sender 工具）。设为 2 表示拉黑过 2 次及以上才提醒 Bot。",
+        "default": 2
+    },
+    "max_ban_history": {
+        "description": "每个用户保留的拉黑历史最大条数",
+        "type": "int",
+        "hint": "每个用户最多保留多少条历史拉黑记录，防止数据无限增长。",
+        "default": 20
+    },
   "permanent_ban_messages": {
     "description": "永久拉黑用户的自动回复语录列表（支持模板变量）",
     "type": "list",
