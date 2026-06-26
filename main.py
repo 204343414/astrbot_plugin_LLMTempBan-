@@ -81,7 +81,7 @@ class BlacklistPluginV2(Star):
         # 当某用户累计被拉黑次数 >= 该阈值时，下次触发 LLM 会注入历史拉黑理由，
         # 帮助 Bot 判断是否需要（永久）拉黑。
         self.ban_history_inject_threshold = max(
-            1, self.config.get("ban_history_inject_threshold", 2)
+            1, self.config.get("ban_history_inject_threshold", 1)
         )
         # 每个用户最多保留的拉黑历史条数，防止无限增长
         self.max_ban_history = max(1, self.config.get("max_ban_history", 20))
@@ -130,7 +130,7 @@ class BlacklistPluginV2(Star):
         self._load_data()
 
         logger.info("=" * 60)
-        logger.info("拉黑插件 v2.6.0 初始化完成")
+        logger.info("拉黑插件 v2.7.0 初始化完成")
         logger.info(f"自动拉黑阈值: {self.spam_threshold}条/{self.spam_window_seconds}秒")
         logger.info(f"拉黑时长: {self.auto_blacklist_duration_minutes}分钟")
         logger.info(f"永久拉黑回复间隔: {self.permanent_ban_reply_interval}秒")
@@ -500,15 +500,19 @@ class BlacklistPluginV2(Star):
 
         detail = self._format_ban_history_text(user_id, max_items=self.max_ban_history)
         text = (
-            f"\n\n[拉黑历史警示] 用户 {user_id} 此前已被拉黑 {len(history)} 次，"
-            f"以下为最近的拉黑记录（含日期、地点、原因）：\n"
+            f"\n\n[拉黑前科警示] 你没有长期记忆，但本系统按对方的账号全局记录了拉黑历史"
+            f"（跨群、跨私聊通用）。当前这个人（{user_id}）此前已被拉黑 {len(history)} 次，"
+            f"哪怕发生在别的群或私聊，下面都是 ta 的完整前科（含日期、地点、原因）：\n"
             f"{detail}\n"
         )
         text += (
-            "\n该用户存在多次被拉黑记录。请结合本轮对话判断：若对方仍在恶俗、骚扰、"
-            "诱导发送敏感内容或重复违规，你可以调用 ban_sender 工具自行拉黑对方，"
-            "并自行决定时长——情节严重或屡教不改可设 duration_minutes=-1 永久拉黑；"
-            "若对方本次行为正常，请正常回复，不要滥用拉黑。"
+            "\n请把以上前科当作你对此人的『记忆』，结合本轮对话二选一：\n"
+            "【路线1·放过】若对方本次行为正常、只是旧事，请正常回复，不要因为旧账翻脸，"
+            "也不要滥用拉黑。\n"
+            "【路线2·升级】若对方本次仍在恶俗、骚扰、辱骂、诱导发送政治敏感等易封号内容，"
+            "请调用 ban_sender 工具拉黑 ta，并根据前科严重程度逐级加重时长；"
+            "对于屡教不改、跨群重复作恶者，可直接设 duration_minutes=-1 永久拉黑——"
+            "永久拉黑后 ta 将再也无法触发或与你互动，你可以在拉黑前阴阳怪气地送 ta 一程。"
         )
 
         try:
@@ -852,7 +856,14 @@ class BlacklistPluginV2(Star):
     ):
         """拉黑“当前正在与你对话的这个人”。当你根据对话判断对方恶俗、骚扰、诱导发送
         敏感内容或多次违规时，可自行调用本工具。管理员会被自动保护、无法被拉黑。
-        你可以自行决定时长：屡教不改或情节严重时设 duration_minutes=-1 永久拉黑。
+
+        你没有长期记忆，但系统会按对方账号全局记录拉黑前科（跨群、跨私聊通用），
+        并在 ta 再次出现时把前科展示给你。请据此二选一：
+        路线1（放过）——本次行为正常就别拉黑；
+        路线2（升级）——本次仍在作恶则拉黑，并按前科严重程度逐级加重时长，
+        对屡教不改、跨群重复作恶者可设 duration_minutes=-1 永久拉黑。
+        提示：永久拉黑后，对方将再也无法触发或与你互动；你可以在调用本工具前，
+        先阴阳怪气地回敬对方一句作为“送别”，再执行永久拉黑。
 
         Args:
             duration_minutes(int): 拉黑时长（分钟），-1 表示永久拉黑，默认永久
