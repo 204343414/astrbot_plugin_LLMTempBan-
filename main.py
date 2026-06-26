@@ -1,17 +1,30 @@
 """
-LLMTempBan 增强版 v2.4 - 支持 LLM 工具拉黑、永久拉黑与自定义拉黑语录
+LLMTempBan 增强版 v2.5 - 支持 LLM 工具拉黑、永久拉黑、拉黑历史与自定义拉黑语录
 
 核心目标：
-1. 通过 LLM 工具 ban_user 实现灵活拉黑（5 分钟 ~ 永久）
+1. 通过 LLM 工具 ban_user / ban_sender 实现灵活拉黑（5 分钟 ~ 永久）
 2. 永久拉黑用户触发 Bot 时，按配置间隔自动回复自定义语录（默认 1 小时一次）
 3. 确保 stop_event() 能真正阻止消息触发 LLM 调用，避免烧 token
 4. 临时黑名单到点自动解除
+
+v2.5 新增：
+- 拉黑历史记录：每次拉黑（管理员/LLM/自动刷屏）都会记录时长、来源与原因。
+- 当某用户累计被拉黑达到阈值（默认 2 次）时，下次其消息触发 LLM 会把
+  历史拉黑理由注入到上下文中，让 Bot 自行判断是否需要（永久）拉黑。
+- 新增 ban_sender 工具：Bot 可在判定对方恶俗/多次违规时，自行拉黑“当前说话人”
+  （仍然保护管理员）。永久与否完全交由 Bot/管理员决定，不做强制自动升级。
+- 修复重启后拉黑数据被清空的问题：所有拉黑/历史/已读不回数据持久化到
+  AstrBot data 目录（data/plugin_data/astrbot_plugin_LLMTempBan/ban_data.json），
+  重启或重载插件后自动恢复。
 """
 
+import json
+import os
 import random
 import time
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import filter, AstrMessageEvent
@@ -19,21 +32,32 @@ from astrbot.api.message_components import At, Image
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 
+# StarTools.get_data_dir 用于获取与插件目录分离的持久化目录，防止更新/重装丢数据。
+# 做容错导入，低版本无该 API 时回退到手动拼接 data 路径。
+try:
+    from astrbot.api.star import StarTools
+except Exception:  # pragma: no cover - 兼容性兜底
+    StarTools = None
+
+# 插件名，用于定位持久化数据目录
+PLUGIN_NAME = "astrbot_plugin_LLMTempBan"
+
 
 @register(
     "astrbot_plugin_LLMTempBan_v2",
     "204343414",
-    "LLM临时拉黑（增强版：支持永久拉黑+自定义拉黑语录）",
-    "2.4.0",
+    "LLM临时拉黑（增强版：永久拉黑+拉黑历史+自定义语录+数据持久化）",
+    "2.5.0",
 )
 class BlacklistPluginV2(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        self.temporary_blacklist = {}  # {用户ID: 解禁时间戳}
+        self.temporary_blacklist = {}  # {用户ID: 解禁时间戳，永久为 float("inf")}
         self.permanent_ban_time = {}  # {用户ID: 拉黑时间戳}
         self.permanent_ban_last_reply = {}  # {用户ID: 上次自动回复时间戳}
         self.ignore_history = {}  # {session_id: [{time_str, sender_id, message, reason}]}
+        self.ban_history = {}  # {用户ID: [{time, time_str, duration_text, reason, caller}]}
         self.spam_tracker: dict[str, deque[float]] = {}
 
         self.default_blacklist_duration = self.config.get(
@@ -52,6 +76,15 @@ class BlacklistPluginV2(Star):
         self.auto_blacklist_duration_minutes = self.config.get(
             "auto_blacklist_duration_minutes", 10
         )
+
+        # 拉黑历史配置
+        # 当某用户累计被拉黑次数 >= 该阈值时，下次触发 LLM 会注入历史拉黑理由，
+        # 帮助 Bot 判断是否需要（永久）拉黑。
+        self.ban_history_inject_threshold = max(
+            1, self.config.get("ban_history_inject_threshold", 2)
+        )
+        # 每个用户最多保留的拉黑历史条数，防止无限增长
+        self.max_ban_history = max(1, self.config.get("max_ban_history", 20))
 
         # 好友检测与永久拉黑自动删好友配置
         self.auto_delete_friend_on_permanent_ban = self.config.get(
@@ -91,15 +124,145 @@ class BlacklistPluginV2(Star):
             self.friend_permanent_ban_messages
         )
 
+        # === 持久化数据文件定位 ===
+        self.data_file = self._resolve_data_file()
+        # 从磁盘加载历史拉黑/黑名单数据（修复重启数据清空 bug）
+        self._load_data()
+
         logger.info("=" * 60)
-        logger.info("拉黑插件 v2.4.0 初始化完成")
+        logger.info("拉黑插件 v2.5.0 初始化完成")
         logger.info(f"自动拉黑阈值: {self.spam_threshold}条/{self.spam_window_seconds}秒")
         logger.info(f"拉黑时长: {self.auto_blacklist_duration_minutes}分钟")
         logger.info(f"永久拉黑回复间隔: {self.permanent_ban_reply_interval}秒")
         logger.info(f"永久拉黑语录数: {len(self.permanent_ban_messages)}")
         logger.info(f"好友专用永久拉黑语录数: {len(self.friend_permanent_ban_messages)}")
         logger.info(f"永久拉黑自动删好友: {self.auto_delete_friend_on_permanent_ban}")
+        logger.info(f"拉黑历史注入阈值: {self.ban_history_inject_threshold} 次")
+        logger.info(
+            f"已加载持久化数据: 黑名单 {len(self.temporary_blacklist)} 人，"
+            f"历史记录 {len(self.ban_history)} 人 "
+            f"(文件: {self.data_file})"
+        )
         logger.info("=" * 60)
+
+    # ==================== 持久化：加载 / 保存 ====================
+    def _resolve_data_file(self) -> Path | None:
+        """定位持久化数据文件路径（data/plugin_data/<插件名>/ban_data.json）。"""
+        # 优先使用官方推荐的 StarTools.get_data_dir
+        try:
+            if StarTools is not None:
+                data_dir = StarTools.get_data_dir(PLUGIN_NAME)
+                return Path(data_dir) / "ban_data.json"
+        except Exception as e:
+            logger.warning(f"[LLMTempBan] StarTools.get_data_dir 失败，尝试回退: {e}")
+
+        # 回退：手动拼接 AstrBot data 路径
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+            base = Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME
+            base.mkdir(parents=True, exist_ok=True)
+            return base / "ban_data.json"
+        except Exception as e:
+            logger.error(
+                f"[LLMTempBan] 无法定位持久化目录，拉黑数据将无法在重启后保留: {e}"
+            )
+            return None
+
+    def _load_data(self):
+        """从磁盘加载持久化数据，并清理已过期的临时拉黑。"""
+        if not self.data_file:
+            return
+        try:
+            if not Path(self.data_file).exists():
+                return
+            with open(self.data_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            # 临时黑名单：None 代表永久（float("inf")）
+            tb = data.get("temporary_blacklist", {}) or {}
+            loaded_tb = {}
+            for k, v in tb.items():
+                loaded_tb[str(k)] = float("inf") if v is None else float(v)
+            self.temporary_blacklist = loaded_tb
+
+            self.permanent_ban_time = {
+                str(k): float(v)
+                for k, v in (data.get("permanent_ban_time", {}) or {}).items()
+            }
+            self.permanent_ban_last_reply = {
+                str(k): float(v)
+                for k, v in (data.get("permanent_ban_last_reply", {}) or {}).items()
+            }
+            self.ban_history = {
+                str(k): list(v)
+                for k, v in (data.get("ban_history", {}) or {}).items()
+            }
+            self.ignore_history = {
+                str(k): list(v)
+                for k, v in (data.get("ignore_history", {}) or {}).items()
+            }
+
+            # 清理已过期的临时拉黑（重启期间可能已到期）
+            now = time.time()
+            expired = [
+                uid
+                for uid, unblock in self.temporary_blacklist.items()
+                if unblock != float("inf") and unblock <= now
+            ]
+            for uid in expired:
+                self.temporary_blacklist.pop(uid, None)
+                self.permanent_ban_time.pop(uid, None)
+                self.permanent_ban_last_reply.pop(uid, None)
+            if expired:
+                logger.info(
+                    f"[LLMTempBan] 启动时清理了 {len(expired)} 个已到期的临时拉黑"
+                )
+        except Exception as e:
+            logger.error(f"[LLMTempBan] 加载持久化数据失败（将以空数据启动）: {e}")
+
+    def _save_data(self):
+        """原子写入持久化数据。任何状态变更后调用。"""
+        if not self.data_file:
+            return
+        try:
+            data = {
+                # 永久拉黑用 None 表示，避免 float("inf") 写入非标准 JSON
+                "temporary_blacklist": {
+                    k: (None if v == float("inf") else v)
+                    for k, v in self.temporary_blacklist.items()
+                },
+                "permanent_ban_time": self.permanent_ban_time,
+                "permanent_ban_last_reply": self.permanent_ban_last_reply,
+                "ban_history": self.ban_history,
+                "ignore_history": self.ignore_history,
+            }
+            data_path = Path(self.data_file)
+            data_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = data_path.with_name(data_path.name + ".tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, data_path)
+        except Exception as e:
+            logger.warning(f"[LLMTempBan] 保存持久化数据失败: {e}")
+
+    def _record_ban_history(
+        self, user_id: str, duration_text: str, reason: str, caller: str
+    ):
+        """记录一次拉黑历史。"""
+        entry = {
+            "time": time.time(),
+            "time_str": time.strftime("%Y-%m-%d %H:%M"),
+            "duration_text": duration_text,
+            "reason": reason or "",
+            "caller": caller,
+        }
+        self.ban_history.setdefault(user_id, []).append(entry)
+        # 限制长度，防止无限增长
+        if len(self.ban_history[user_id]) > self.max_ban_history:
+            self.ban_history[user_id] = self.ban_history[user_id][
+                -self.max_ban_history :
+            ]
 
     # ==================== 第一道防线：监听钩子（全局黑名单拦截 + 私聊刷屏检测） ====================
     @filter.regex(r"[\s\S]*", priority=10)
@@ -134,6 +297,7 @@ class BlacklistPluginV2(Star):
                         self.temporary_blacklist[user_id] = max(
                             unblock_time, new_unblock
                         )
+                        self._save_data()
                         logger.info(
                             f"[LLMTempBan] 【私聊】黑名单用户继续发消息 user={user_id} "
                             f"延长至 {time.ctime(self.temporary_blacklist[user_id])}"
@@ -151,6 +315,7 @@ class BlacklistPluginV2(Star):
                 del self.temporary_blacklist[user_id]
                 self.permanent_ban_time.pop(user_id, None)
                 self.permanent_ban_last_reply.pop(user_id, None)
+                self._save_data()
                 logger.info(f"[LLMTempBan] 用户 {user_id} 拉黑已过期，自动解除")
 
         # === 私聊刷屏检测 ===
@@ -201,11 +366,23 @@ class BlacklistPluginV2(Star):
             unblock_time = time.time() + duration * 60
             self.temporary_blacklist[user_id] = unblock_time
 
+            # 记录拉黑历史（供后续 Bot 判断是否升级为永久拉黑）
+            reason = (
+                f"自动刷屏检测：{self.spam_window_seconds}秒内积分 {count} "
+                f"达到阈值 {self.spam_threshold}"
+                f"（图片数={num_images} 独特={num_unique} 有重复={has_dup}）"
+            )
+            self._record_ban_history(
+                user_id, f"{duration} 分钟", reason, caller="auto_spam"
+            )
+            self._save_data()
+
             logger.warning(
                 f"[LLMTempBan] ⛔ 【私聊】自动触发刷屏拉黑 user={user_id}\n"
                 f" 窗口内积分: {count} >= 阈值 {self.spam_threshold}\n"
                 f" 本消息: 图片数={num_images} 独特={num_unique} 有重复={has_dup}\n"
-                f" 拉黑 {duration} 分钟（至 {time.ctime(unblock_time)}）"
+                f" 拉黑 {duration} 分钟（至 {time.ctime(unblock_time)}）\n"
+                f" 该用户累计被拉黑 {len(self.ban_history.get(user_id, []))} 次"
             )
 
             # ⭐ 关键：立即stop_event，阻止所有后续处理
@@ -222,6 +399,8 @@ class BlacklistPluginV2(Star):
         """
         LLM请求前的最终拦截点。
         这是防止消息触发LLM的最后一道防线。
+        对于未被拉黑但有多次拉黑历史的用户，会注入历史拉黑理由，
+        让 Bot 自行判断是否需要（永久）拉黑。
         """
         user_id = self._normalize_user_id(event.message_obj.sender.user_id)
         session_id = self._get_session_id(event)
@@ -259,17 +438,52 @@ class BlacklistPluginV2(Star):
                 del self.temporary_blacklist[user_id]
                 self.permanent_ban_time.pop(user_id, None)
                 self.permanent_ban_last_reply.pop(user_id, None)
+                self._save_data()
                 logger.info(f"[LLMTempBan] 用户 {user_id} 拉黑已过期")
+
+        # 注入历史拉黑理由（达到阈值时），让 Bot 自行决定是否再次/永久拉黑
+        self._inject_ban_history(user_id, req)
 
         # 注入已读不回历史（按次数累积，让 LLM 自己决定是否继续潜水）
         self._inject_ignore_history(session_id, req)
+
+    def _inject_ban_history(self, user_id: str, req: ProviderRequest):
+        """对累计被拉黑达到阈值的用户，把历史拉黑理由注入到本轮 LLM 上下文。"""
+        history = self.ban_history.get(user_id) or []
+        if len(history) < self.ban_history_inject_threshold:
+            return
+
+        recent = history[-self.max_ban_history :]
+        text = (
+            f"\n\n[拉黑历史警示] 用户 {user_id} 此前已被拉黑 {len(history)} 次，"
+            f"以下为最近的拉黑记录：\n"
+        )
+        for idx, h in enumerate(recent, start=1):
+            text += (
+                f"{idx}. [{h.get('time_str', '')}] 时长：{h.get('duration_text', '未知')}，"
+                f"来源：{h.get('caller', '未知')}，"
+                f"原因：{h.get('reason') or '未填写'}\n"
+            )
+        text += (
+            "\n该用户存在多次被拉黑记录。请结合本轮对话判断：若对方仍在恶俗、骚扰、"
+            "诱导发送敏感内容或重复违规，你可以调用 ban_sender 工具自行拉黑对方，"
+            "并自行决定时长——情节严重或屡教不改可设 duration_minutes=-1 永久拉黑；"
+            "若对方本次行为正常，请正常回复，不要滥用拉黑。"
+        )
+
+        try:
+            from astrbot.core.agent.message import TextPart
+
+            req.extra_user_content_parts.append(TextPart(text=text).mark_as_temp())
+        except Exception as e:
+            logger.debug(f"注入拉黑历史失败: {e}")
 
     def _inject_ignore_history(self, session_id, req: ProviderRequest):
         """注入已读不回历史到请求中"""
         if session_id not in self.ignore_history or not self.ignore_history[session_id]:
             return
 
-        history = self.ignore_history[session_id][-self.max_ignore_history:]
+        history = self.ignore_history[session_id][-self.max_ignore_history :]
         text = (
             f"\n\n[已读不回记录] 你在本会话已执行 {len(self.ignore_history[session_id])} 次已读不回。"
             f"以下是对方此前发送的消息记录，请判断是否仍在重复骚扰/无意义发言。\n"
@@ -300,10 +514,7 @@ class BlacklistPluginV2(Star):
 
         # 选择语录池：好友优先使用 friend_permanent_ban_messages（如果配置且非空）
         messages = self.permanent_ban_messages
-        if (
-            self.friend_permanent_ban_messages
-            and await self._is_friend(user_id)
-        ):
+        if self.friend_permanent_ban_messages and await self._is_friend(user_id):
             messages = self.friend_permanent_ban_messages
 
         if not messages:
@@ -316,6 +527,7 @@ class BlacklistPluginV2(Star):
         try:
             await event.send(event.plain_result(message))
             self.permanent_ban_last_reply[user_id] = now
+            self._save_data()
             logger.info(
                 f"[LLMTempBan] 已向永久拉黑用户 {user_id} 发送语录: {message[:50]}..."
             )
@@ -399,9 +611,6 @@ class BlacklistPluginV2(Star):
 
         return False
 
-    # ==================== 命令处理 ====================
-
-
     # ==================== 命令处理（仅管理员） ====================
     @filter.command("拉黑_")
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -411,7 +620,7 @@ class BlacklistPluginV2(Star):
         text = event.message_str.strip()
         for prefix in ("/拉黑_", "拉黑_"):
             if text.startswith(prefix):
-                text = text[len(prefix):].strip()
+                text = text[len(prefix) :].strip()
                 break
 
         if not text:
@@ -445,7 +654,7 @@ class BlacklistPluginV2(Star):
         text = event.message_str.strip()
         for prefix in ("/解禁_", "解禁_"):
             if text.startswith(prefix):
-                text = text[len(prefix):].strip()
+                text = text[len(prefix) :].strip()
                 break
 
         if not text:
@@ -457,6 +666,7 @@ class BlacklistPluginV2(Star):
             del self.temporary_blacklist[target_id]
             self.permanent_ban_time.pop(target_id, None)
             self.permanent_ban_last_reply.pop(target_id, None)
+            self._save_data()
             logger.info(f"[LLMTempBan] 管理员解禁用户 {target_id}")
             yield event.plain_result(f"已解禁用户 {target_id}")
         else:
@@ -471,22 +681,84 @@ class BlacklistPluginV2(Star):
             return
 
         now = time.time()
+        changed = False
         lines = ["📋 当前拉黑列表：\n"]
         for uid, unblock_time in list(self.temporary_blacklist.items()):
             remaining = unblock_time - now
+            ban_count = len(self.ban_history.get(uid, []))
+            count_text = f"（累计被拉黑 {ban_count} 次）" if ban_count else ""
             if unblock_time == float("inf"):
-                lines.append(f"• {uid}: 永久拉黑")
+                lines.append(f"• {uid}: 永久拉黑{count_text}")
             elif remaining > 0:
                 mins = int(remaining // 60)
                 secs = int(remaining % 60)
-                lines.append(f"• {uid}: 剩余 {mins}分{secs}秒")
+                lines.append(f"• {uid}: 剩余 {mins}分{secs}秒{count_text}")
             else:
                 lines.append(f"• {uid}: 已过期（即将自动解除）")
                 del self.temporary_blacklist[uid]
                 self.permanent_ban_time.pop(uid, None)
                 self.permanent_ban_last_reply.pop(uid, None)
+                changed = True
+
+        if changed:
+            self._save_data()
 
         yield event.plain_result("\n".join(lines))
+
+    @filter.command("拉黑历史_")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def ban_history_cmd(self, event: AstrMessageEvent, target: str = None):
+        """查看某用户的历史拉黑记录与理由（仅管理员）。用法：/拉黑历史_ @用户"""
+        text = event.message_str.strip()
+        for prefix in ("/拉黑历史_", "拉黑历史_"):
+            if text.startswith(prefix):
+                text = text[len(prefix) :].strip()
+                break
+
+        if not text:
+            yield event.plain_result("请指定要查询的用户：/拉黑历史_ @用户")
+            return
+
+        target_id = self._extract_target_id(text.split()[0])
+        if not target_id:
+            yield event.plain_result("无法识别目标用户")
+            return
+
+        history = self.ban_history.get(target_id) or []
+        if not history:
+            yield event.plain_result(f"用户 {target_id} 没有历史拉黑记录 ✅")
+            return
+
+        lines = [f"📜 用户 {target_id} 共被拉黑 {len(history)} 次：\n"]
+        for idx, h in enumerate(history, start=1):
+            lines.append(
+                f"{idx}. [{h.get('time_str', '')}] 时长：{h.get('duration_text', '未知')}"
+                f" | 来源：{h.get('caller', '未知')}"
+                f" | 原因：{h.get('reason') or '未填写'}"
+            )
+        yield event.plain_result("\n".join(lines))
+
+    @filter.command("清空拉黑历史_")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def clear_ban_history_cmd(self, event: AstrMessageEvent, target: str = None):
+        """清空某用户的历史拉黑记录（仅管理员）。用法：/清空拉黑历史_ @用户"""
+        text = event.message_str.strip()
+        for prefix in ("/清空拉黑历史_", "清空拉黑历史_"):
+            if text.startswith(prefix):
+                text = text[len(prefix) :].strip()
+                break
+
+        if not text:
+            yield event.plain_result("请指定要清空历史的用户：/清空拉黑历史_ @用户")
+            return
+
+        target_id = self._extract_target_id(text.split()[0])
+        if target_id and target_id in self.ban_history:
+            del self.ban_history[target_id]
+            self._save_data()
+            yield event.plain_result(f"已清空用户 {target_id} 的拉黑历史记录")
+        else:
+            yield event.plain_result(f"用户 {target_id} 没有历史拉黑记录")
 
     # ==================== LLM 工具 ====================
     @filter.llm_tool(name="ban_user")
@@ -497,13 +769,13 @@ class BlacklistPluginV2(Star):
         duration_minutes: int = -1,
         reason: str = "",
     ):
-        '''拉黑指定用户。仅管理员可调用。duration_minutes=-1 表示永久拉黑，其他正整数表示临时拉黑分钟数。
+        """拉黑指定用户。仅管理员可调用。duration_minutes=-1 表示永久拉黑，其他正整数表示临时拉黑分钟数。
 
         Args:
             target_user_id(string): 要拉黑的用户 ID（群聊中也可通过 @ 目标自动识别，但建议填写）
             duration_minutes(int): 拉黑时长（分钟），-1 表示永久拉黑，默认永久
             reason(string): 拉黑原因，可选
-        '''
+        """
         # 仅管理员可调用 LLM 拉黑工具
         if not event.is_admin():
             return "无权使用：只有 AstrBot 管理员才能调用拉黑工具。"
@@ -521,13 +793,42 @@ class BlacklistPluginV2(Star):
             target_id, duration_minutes, caller="admin_llm", reason=reason
         )
 
+    @filter.llm_tool(name="ban_sender")
+    async def ban_sender_tool(
+        self,
+        event: AstrMessageEvent,
+        duration_minutes: int = -1,
+        reason: str = "",
+    ):
+        """拉黑“当前正在与你对话的这个人”。当你根据对话判断对方恶俗、骚扰、诱导发送
+        敏感内容或多次违规时，可自行调用本工具。管理员会被自动保护、无法被拉黑。
+        你可以自行决定时长：屡教不改或情节严重时设 duration_minutes=-1 永久拉黑。
+
+        Args:
+            duration_minutes(int): 拉黑时长（分钟），-1 表示永久拉黑，默认永久
+            reason(string): 拉黑原因（请简述对方的违规/恶俗行为，会记入拉黑历史）
+        """
+        user_id = self._normalize_user_id(event.message_obj.sender.user_id)
+
+        # 保护管理员
+        if event.is_admin():
+            return "对方是管理员，无法拉黑。"
+
+        result = await self._ban_user(
+            user_id,
+            duration_minutes,
+            caller="llm_auto",
+            reason=reason or "Bot 自主判定：对方存在违规/恶俗行为",
+        )
+        return result
+
     @filter.llm_tool(name="read_and_ignore")
     async def read_and_ignore(self, event: AstrMessageEvent, reason: str = "无意义发言"):
-        '''已读不回工具。调用后会记录本次用户消息，下次 LLM 会看到累计历史并决定是否继续潜水。
+        """已读不回工具。调用后会记录本次用户消息，下次 LLM 会看到累计历史并决定是否继续潜水。
 
         Args:
             reason(string): 忽略原因
-        '''
+        """
         session_id = self._get_session_id(event)
         user_id = self._normalize_user_id(event.message_obj.sender.user_id)
 
@@ -549,17 +850,22 @@ class BlacklistPluginV2(Star):
                 -self.max_ignore_history :
             ]
 
-        logger.info(f"[LLMTempBan] 已读不回 session={session_id} 次数={len(self.ignore_history[session_id])}")
+        self._save_data()
+
+        logger.info(
+            f"[LLMTempBan] 已读不回 session={session_id} 次数={len(self.ignore_history[session_id])}"
+        )
 
         return "已忽略此消息，并记录到已读不回历史中。"
 
     @filter.llm_tool(name="reset_ignore_status")
     async def reset_ignore_status(self, event: AstrMessageEvent):
-        '''重置已读不回状态，清空累计历史记录。'''
+        """重置已读不回状态，清空累计历史记录。"""
         session_id = self._get_session_id(event)
 
         if session_id in self.ignore_history:
             del self.ignore_history[session_id]
+            self._save_data()
 
         return "已清空已读不回历史。"
 
@@ -596,9 +902,15 @@ class BlacklistPluginV2(Star):
             self.permanent_ban_time[target_id] = now
             self.permanent_ban_last_reply[target_id] = 0
 
+        # 记录拉黑历史并持久化
+        self._record_ban_history(target_id, duration_text, reason, caller)
+        self._save_data()
+
+        ban_count = len(self.ban_history.get(target_id, []))
         log_reason = f" 原因: {reason}" if reason else ""
         logger.warning(
-            f"[LLMTempBan] 管理员 {caller} 拉黑用户 {target_id} {duration_text}{log_reason}"
+            f"[LLMTempBan] {caller} 拉黑用户 {target_id} {duration_text}{log_reason}"
+            f"（累计 {ban_count} 次）"
         )
 
         extra_text = ""
@@ -616,14 +928,18 @@ class BlacklistPluginV2(Star):
                 logger.warning(f"[LLMTempBan] 永久拉黑好友检测/删除失败: {e}")
                 extra_text = " 好友检测/删除过程出错。"
 
+        history_text = (
+            f"（该用户累计已被拉黑 {ban_count} 次）" if ban_count > 1 else ""
+        )
+
         if permanent:
             return (
-                f"已永久拉黑用户 {target_id}。"
+                f"已永久拉黑用户 {target_id}。{history_text}"
                 f"此后该用户每次触发 Bot，将每隔 {self.permanent_ban_reply_interval} 秒"
                 f"收到一条自动回复语录。{extra_text}"
             )
         return (
-            f"已拉黑用户 {target_id} {duration_text}，"
+            f"已拉黑用户 {target_id} {duration_text}，{history_text}"
             f"到期时间: {time.ctime(unblock_time)}。"
             f"拉黑期间对方消息不会触发 LLM 回复。"
         )
@@ -684,5 +1000,12 @@ class BlacklistPluginV2(Star):
         return None
 
     async def terminate(self):
-        """插件卸载时保存配置"""
-        self.config.save_config()
+        """插件卸载/停用时保存配置与持久化数据"""
+        try:
+            self._save_data()
+        except Exception as e:
+            logger.warning(f"[LLMTempBan] terminate 保存数据失败: {e}")
+        try:
+            self.config.save_config()
+        except Exception as e:
+            logger.warning(f"[LLMTempBan] terminate 保存配置失败: {e}")
