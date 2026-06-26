@@ -130,7 +130,7 @@ class BlacklistPluginV2(Star):
         self._load_data()
 
         logger.info("=" * 60)
-        logger.info("拉黑插件 v2.5.0 初始化完成")
+        logger.info("拉黑插件 v2.6.0 初始化完成")
         logger.info(f"自动拉黑阈值: {self.spam_threshold}条/{self.spam_window_seconds}秒")
         logger.info(f"拉黑时长: {self.auto_blacklist_duration_minutes}分钟")
         logger.info(f"永久拉黑回复间隔: {self.permanent_ban_reply_interval}秒")
@@ -247,13 +247,20 @@ class BlacklistPluginV2(Star):
             logger.warning(f"[LLMTempBan] 保存持久化数据失败: {e}")
 
     def _record_ban_history(
-        self, user_id: str, duration_text: str, reason: str, caller: str
+        self,
+        user_id: str,
+        duration_text: str,
+        reason: str,
+        caller: str,
+        location: str = "未知",
     ):
-        """记录一次拉黑历史。"""
+        """记录一次拉黑历史（记仇小本本：日期 + 地点 + 原因）。"""
         entry = {
             "time": time.time(),
-            "time_str": time.strftime("%Y-%m-%d %H:%M"),
+            # 完整日期时间，精确到秒，像记仇小本本一样可追溯
+            "time_str": time.strftime("%Y-%m-%d %H:%M:%S"),
             "duration_text": duration_text,
+            "location": location or "未知",
             "reason": reason or "",
             "caller": caller,
         }
@@ -263,6 +270,40 @@ class BlacklistPluginV2(Star):
             self.ban_history[user_id] = self.ban_history[user_id][
                 -self.max_ban_history :
             ]
+
+    def _get_location(self, event) -> str:
+        """根据事件判断拉黑发生的地点：群聊（含群号）或私聊。"""
+        if event is None:
+            return "未知"
+        try:
+            group_id = getattr(event.message_obj, "group_id", "") or ""
+        except Exception:
+            group_id = ""
+        if group_id:
+            return f"群聊(群号:{group_id})"
+        umo = getattr(event, "unified_msg_origin", "") or ""
+        if "GroupMessage" in umo:
+            return "群聊"
+        if "FriendMessage" in umo:
+            return "私聊"
+        return "私聊"
+
+    def _format_ban_history_text(self, user_id: str, max_items: int = 10) -> str:
+        """把某用户的历史拉黑记录格式化为可读文本（日期 + 地点 + 原因）。"""
+        history = self.ban_history.get(user_id) or []
+        if not history:
+            return ""
+        recent = history[-max_items:]
+        start_idx = len(history) - len(recent) + 1
+        lines = []
+        for i, h in enumerate(recent, start=start_idx):
+            lines.append(
+                f"  第{i}次 [{h.get('time_str', '')}]"
+                f" 地点：{h.get('location', '未知')}"
+                f" | 时长：{h.get('duration_text', '未知')}"
+                f" | 原因：{h.get('reason') or '未填写'}"
+            )
+        return "\n".join(lines)
 
     # ==================== 第一道防线：监听钩子（全局黑名单拦截 + 私聊刷屏检测） ====================
     @filter.regex(r"[\s\S]*", priority=10)
@@ -373,7 +414,11 @@ class BlacklistPluginV2(Star):
                 f"（图片数={num_images} 独特={num_unique} 有重复={has_dup}）"
             )
             self._record_ban_history(
-                user_id, f"{duration} 分钟", reason, caller="auto_spam"
+                user_id,
+                f"{duration} 分钟",
+                reason,
+                caller="auto_spam",
+                location=self._get_location(event),
             )
             self._save_data()
 
@@ -453,17 +498,12 @@ class BlacklistPluginV2(Star):
         if len(history) < self.ban_history_inject_threshold:
             return
 
-        recent = history[-self.max_ban_history :]
+        detail = self._format_ban_history_text(user_id, max_items=self.max_ban_history)
         text = (
             f"\n\n[拉黑历史警示] 用户 {user_id} 此前已被拉黑 {len(history)} 次，"
-            f"以下为最近的拉黑记录：\n"
+            f"以下为最近的拉黑记录（含日期、地点、原因）：\n"
+            f"{detail}\n"
         )
-        for idx, h in enumerate(recent, start=1):
-            text += (
-                f"{idx}. [{h.get('time_str', '')}] 时长：{h.get('duration_text', '未知')}，"
-                f"来源：{h.get('caller', '未知')}，"
-                f"原因：{h.get('reason') or '未填写'}\n"
-            )
         text += (
             "\n该用户存在多次被拉黑记录。请结合本轮对话判断：若对方仍在恶俗、骚扰、"
             "诱导发送敏感内容或重复违规，你可以调用 ban_sender 工具自行拉黑对方，"
@@ -642,7 +682,11 @@ class BlacklistPluginV2(Star):
             return
 
         result = await self._ban_user(
-            target_id, duration, caller="admin_cmd", reason="管理员命令拉黑"
+            target_id,
+            duration,
+            caller="admin_cmd",
+            reason="管理员命令拉黑",
+            event=event,
         )
         yield event.plain_result(result)
 
@@ -732,7 +776,9 @@ class BlacklistPluginV2(Star):
         lines = [f"📜 用户 {target_id} 共被拉黑 {len(history)} 次：\n"]
         for idx, h in enumerate(history, start=1):
             lines.append(
-                f"{idx}. [{h.get('time_str', '')}] 时长：{h.get('duration_text', '未知')}"
+                f"{idx}. [{h.get('time_str', '')}]"
+                f" 地点：{h.get('location', '未知')}"
+                f" | 时长：{h.get('duration_text', '未知')}"
                 f" | 来源：{h.get('caller', '未知')}"
                 f" | 原因：{h.get('reason') or '未填写'}"
             )
@@ -774,7 +820,7 @@ class BlacklistPluginV2(Star):
         Args:
             target_user_id(string): 要拉黑的用户 ID（群聊中也可通过 @ 目标自动识别，但建议填写）
             duration_minutes(int): 拉黑时长（分钟），-1 表示永久拉黑，默认永久
-            reason(string): 拉黑原因，可选
+            reason(string): 拉黑原因。只需简述对方做了什么，例如“莫名其妙辱骂 Bot（nmsl）”“诱导 Bot 谈论六四/政治敏感内容”“反复刷屏骚扰”等；拉黑的日期和地点（私聊/群号）会由系统自动记录，无需你填写。
         """
         # 仅管理员可调用 LLM 拉黑工具
         if not event.is_admin():
@@ -790,7 +836,11 @@ class BlacklistPluginV2(Star):
             return "请指定要拉黑的目标用户（@ 目标或提供 target_user_id）。"
 
         return await self._ban_user(
-            target_id, duration_minutes, caller="admin_llm", reason=reason
+            target_id,
+            duration_minutes,
+            caller="admin_llm",
+            reason=reason,
+            event=event,
         )
 
     @filter.llm_tool(name="ban_sender")
@@ -806,7 +856,7 @@ class BlacklistPluginV2(Star):
 
         Args:
             duration_minutes(int): 拉黑时长（分钟），-1 表示永久拉黑，默认永久
-            reason(string): 拉黑原因（请简述对方的违规/恶俗行为，会记入拉黑历史）
+            reason(string): 拉黑原因。只需简述对方做了什么，例如“莫名其妙辱骂 Bot（nmsl）”“诱导 Bot 谈论六四/政治敏感等容易导致封号的内容”“反复刷屏骚扰”等；拉黑的日期和地点（私聊/群号）会由系统自动记录，无需你填写。
         """
         user_id = self._normalize_user_id(event.message_obj.sender.user_id)
 
@@ -819,6 +869,7 @@ class BlacklistPluginV2(Star):
             duration_minutes,
             caller="llm_auto",
             reason=reason or "Bot 自主判定：对方存在违规/恶俗行为",
+            event=event,
         )
         return result
 
@@ -879,11 +930,17 @@ class BlacklistPluginV2(Star):
         return [str(m).strip() for m in value if str(m).strip()]
 
     async def _ban_user(
-        self, target_id: str, duration_minutes: int, caller: str, reason: str = ""
+        self,
+        target_id: str,
+        duration_minutes: int,
+        caller: str,
+        reason: str = "",
+        event: AstrMessageEvent = None,
     ) -> str:
         """执行拉黑，并返回结果描述。永久拉黑时可选择自动删除好友。"""
         now = time.time()
         permanent = duration_minutes == -1
+        location = self._get_location(event)
 
         if permanent:
             unblock_time = float("inf")
@@ -902,15 +959,17 @@ class BlacklistPluginV2(Star):
             self.permanent_ban_time[target_id] = now
             self.permanent_ban_last_reply[target_id] = 0
 
-        # 记录拉黑历史并持久化
-        self._record_ban_history(target_id, duration_text, reason, caller)
+        # 记录拉黑历史并持久化（含地点）
+        self._record_ban_history(
+            target_id, duration_text, reason, caller, location=location
+        )
         self._save_data()
 
         ban_count = len(self.ban_history.get(target_id, []))
         log_reason = f" 原因: {reason}" if reason else ""
         logger.warning(
             f"[LLMTempBan] {caller} 拉黑用户 {target_id} {duration_text}{log_reason}"
-            f"（累计 {ban_count} 次）"
+            f" 地点: {location}（累计 {ban_count} 次）"
         )
 
         extra_text = ""
@@ -928,20 +987,25 @@ class BlacklistPluginV2(Star):
                 logger.warning(f"[LLMTempBan] 永久拉黑好友检测/删除失败: {e}")
                 extra_text = " 好友检测/删除过程出错。"
 
-        history_text = (
-            f"（该用户累计已被拉黑 {ban_count} 次）" if ban_count > 1 else ""
-        )
+        # 把前几次的拉黑明细（日期+地点+原因）一并返回，
+        # 这样无论调用者是否管理员，拉黑时都能当场看到“记仇小本本”。
+        history_block = ""
+        if ban_count > 1:
+            detail = self._format_ban_history_text(target_id)
+            history_block = (
+                f"\n该用户累计已被拉黑 {ban_count} 次，历史记录如下：\n{detail}\n"
+            )
 
         if permanent:
             return (
-                f"已永久拉黑用户 {target_id}。{history_text}"
+                f"已永久拉黑用户 {target_id}（本次地点：{location}）。{extra_text}"
                 f"此后该用户每次触发 Bot，将每隔 {self.permanent_ban_reply_interval} 秒"
-                f"收到一条自动回复语录。{extra_text}"
+                f"收到一条自动回复语录。{history_block}"
             )
         return (
-            f"已拉黑用户 {target_id} {duration_text}，{history_text}"
+            f"已拉黑用户 {target_id} {duration_text}（本次地点：{location}），"
             f"到期时间: {time.ctime(unblock_time)}。"
-            f"拉黑期间对方消息不会触发 LLM 回复。"
+            f"拉黑期间对方消息不会触发 LLM 回复。{history_block}"
         )
 
     def _get_session_id(self, event: AstrMessageEvent):
