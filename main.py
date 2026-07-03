@@ -681,6 +681,43 @@ class BlacklistPluginV2(Star):
 
         return False
 
+    async def _is_group_admin_or_owner(self, group_id: str, user_id: str) -> str:
+        """检测用户是否为群主或管理员，返回 'owner' / 'admin' / 'member' / 'unknown'"""
+        if not group_id or not user_id:
+            return "unknown"
+
+        client = await self._get_client()
+        if not client:
+            return "unknown"
+
+        try:
+            # 尝试 get_group_member_info
+            if hasattr(client, "get_group_member_info"):
+                info = await client.get_group_member_info(group_id=int(group_id), user_id=int(user_id))
+                role = info.get("role", "") or info.get("role_name", "")
+                if role in ("owner", "群主"):
+                    return "owner"
+                elif role in ("admin", "管理员"):
+                    return "admin"
+                return "member"
+
+            # 回退到 call_action
+            info = await client.call_action(
+                "get_group_member_info",
+                group_id=int(group_id),
+                user_id=int(user_id)
+            )
+            role = info.get("role", "") or info.get("role_name", "")
+            if role in ("owner", "群主"):
+                return "owner"
+            elif role in ("admin", "管理员"):
+                return "admin"
+            return "member"
+
+        except Exception as e:
+            logger.debug(f"[LLMTempBan] 获取群成员角色失败: {e}")
+            return "unknown"
+
     # ==================== 命令处理（仅管理员） ====================
     @filter.command("拉黑_")
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -884,12 +921,15 @@ class BlacklistPluginV2(Star):
         敏感内容或多次违规时，可自行调用本工具。管理员会被自动保护、无法被拉黑。
 
         你没有长期记忆，但系统会按对方账号全局记录拉黑前科（跨群、跨私聊通用），
-        并在 ta 再次出现时把前科展示给你。请据此二选一：
-        路线1（放过）——本次行为正常就别拉黑；
-        路线2（升级）——本次仍在作恶则拉黑，并按前科严重程度逐级加重时长，
-        对屡教不改、跨群重复作恶者可设 duration_minutes=-1 永久拉黑。
-        提示：永久拉黑后，对方将再也无法触发或与你互动；你可以在调用本工具前，
-        先阴阳怪气地回敬对方一句作为“送别”，再执行永久拉黑。
+        并在 ta 再次出现时把前科展示给你。
+        
+        【重要】拉黑后系统会自动检测对方是否为群主/管理员，并以醒目格式返回：
+        - 如果是群主/管理员，会给出【严重警告】并建议“永久拉黑 + 立即退群”
+        - 你可以根据返回结果决定：放过 / 永久拉黑 / 永久拉黑+退群
+
+        建议处理策略：
+        - 普通用户：根据前科决定是否永久拉黑
+        - 群主/管理员：推荐永久拉黑 + 立即调用 leave_group 退群（避免蛇鼠一窝）
 
         Args:
             duration_minutes(int): 拉黑时长（分钟），-1 表示永久拉黑，默认永久
@@ -911,13 +951,17 @@ class BlacklistPluginV2(Star):
 
     @filter.llm_tool(name="leave_group")
     async def leave_group_tool(self, event: AstrMessageEvent, reason: str = ""):
-        """当你判断当前群聊环境恶劣（群名+多次恶俗用户辱骂/骚扰AI、诱导敏感内容等），或人格提示词明确要求你退群时，调用此工具让 Bot 主动退出该群聊。
+        """当你判断当前群聊环境恶劣（群名+多次恶俗用户辱骂/骚扰AI、诱导敏感内容等），或检测到被拉黑用户是群主/管理员时，调用此工具让 Bot 主动退出该群聊。
+
+        退出策略建议：
+        - 检测到群主/管理员被拉黑 → 推荐永久拉黑 + 立即退群（避免蛇鼠一窝）
+        - 群内恶俗用户过多 → 可选择永久拉黑 + 退群
 
         退出后 Bot 将不再接收该群消息，也不会再被拉黑或骚扰。
-        建议在调用前先发一句阴阳怪气的告别消息（例如“本Bot已受够了这个群的恶俗氛围，告辞。”），再执行退群。
+        建议保持沉默拉黑，不需要额外阴阳怪气回复（避免被举报）。
 
         Args:
-            reason(string): 退群原因（可选），例如“该群恶俗用户过多、多次辱骂AI、诱导发送敏感内容”等
+            reason(string): 退群原因（可选），例如“该群恶俗用户过多、多次辱骂AI、诱导发送敏感内容、检测到管理员”等
         """
         # Only works in groups
         group_id = self._get_group_id(event)
@@ -1106,10 +1150,23 @@ class BlacklistPluginV2(Star):
                 logger.warning(f"[LLMTempBan] 永久拉黑好友检测/删除失败: {e}")
                 extra_text = " 好友检测/删除过程出错。"
 
+        # 检测是否为群主/管理员（仅群聊有效）
+        admin_role = "member"
+        if "群聊" in location:
+            group_id = self._get_group_id(event)
+            if group_id:
+                admin_role = await self._is_group_admin_or_owner(group_id, target_id)
+
+        admin_warning = ""
+        if admin_role == "owner":
+            admin_warning = "\n\n⚠️【严重警告】该用户是【群主】！\n建议处理：永久拉黑 + 立即调用 leave_group 退群（避免蛇鼠一窝）。"
+        elif admin_role == "admin":
+            admin_warning = "\n\n⚠️【重要警告】该用户是【管理员】！\n建议处理：永久拉黑 + 立即调用 leave_group 退群（避免蛇鼠一窝）。"
+
         # 把前几次的拉黑明细（日期+地点+原因）一并返回，
         # 这样无论调用者是否管理员，拉黑时都能当场看到“记仇小本本”。
         history_block = ""
-        if ban_count > 1:
+        if ban_count > 0:
             detail = self._format_ban_history_text(target_id)
             history_block = (
                 f"\n该用户累计已被拉黑 {ban_count} 次，历史记录如下：\n{detail}\n"
@@ -1119,12 +1176,12 @@ class BlacklistPluginV2(Star):
             return (
                 f"已永久拉黑用户 {target_id}（本次地点：{location}）。{extra_text}"
                 f"此后该用户每次触发 Bot，将每隔 {self.permanent_ban_reply_interval} 秒"
-                f"收到一条自动回复语录。{history_block}"
+                f"收到一条自动回复语录。{history_block}{admin_warning}"
             )
         return (
             f"已拉黑用户 {target_id} {duration_text}（本次地点：{location}），"
             f"到期时间: {time.ctime(unblock_time)}。"
-            f"拉黑期间对方消息不会触发 LLM 回复。{history_block}"
+            f"拉黑期间对方消息不会触发 LLM 回复。{history_block}{admin_warning}"
         )
 
     def _get_session_id(self, event: AstrMessageEvent):
