@@ -85,6 +85,9 @@ class BlacklistPluginV2(Star):
         )
         # 每个用户最多保留的拉黑历史条数，防止无限增长
         self.max_ban_history = max(1, self.config.get("max_ban_history", 20))
+        # 被拉黑多次后限制指令配置
+        self.ban_count_threshold_for_restrict = max(1, self.config.get("ban_count_threshold_for_restrict", 3))
+        self.ban_count_restrict_commands = self.config.get("ban_count_restrict_commands", ["draw", "image", "chat"])
 
         # 好友检测与永久拉黑自动删好友配置
         self.auto_delete_friend_on_permanent_ban = self.config.get(
@@ -547,7 +550,30 @@ class BlacklistPluginV2(Star):
         except Exception as e:
             logger.debug(f"注入已读不回历史失败: {e}")
 
-    # ==================== 永久拉黑自动回复 ====================
+    def _restrict_commands_for_banned_users(self, user_id: str, req: ProviderRequest):
+        """被拉黑多次的用户限制使用特定指令（在 on_llm_request 阶段注入警告）"""
+        ban_count = len(self.ban_history.get(user_id, []))
+        threshold = getattr(self, 'ban_count_threshold_for_restrict', 3)
+        restricted_cmds = getattr(self, 'ban_count_restrict_commands', ["draw", "image", "chat"])
+
+        if ban_count < threshold or not restricted_cmds:
+            return
+
+        # 构造限制提示
+        cmd_list = "、".join([f"/{c}" for c in restricted_cmds])
+        text = (
+            f"\n\n[指令限制提醒] 该用户累计已被拉黑 {ban_count} 次（阈值 {threshold}）。"
+            f"根据配置，当前已禁止使用以下指令：{cmd_list}。"
+            f"若继续违规，将可能被永久拉黑或触发退群。"
+        )
+
+        try:
+            from astrbot.core.agent.message import TextPart
+            req.extra_user_content_parts.append(TextPart(text=text).mark_as_temp())
+        except Exception as e:
+            logger.debug(f"注入指令限制失败: {e}")
+
+    # ==================== 永久拉黑自动回复 ==================
     async def _send_permanent_ban_message(self, event: AstrMessageEvent, user_id: str):
         """按配置间隔向永久拉黑用户发送自定义语录；如目标是好友且开启，可优先使用好友专用语录。"""
         now = time.time()

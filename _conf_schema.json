@@ -29,24 +29,24 @@
     "hint": "窗口内达到此连续触发次数即自动拉黑（建议4-8）",
     "default": 5
   },
-    "auto_blacklist_duration_minutes": {
-        "description": "自动拉黑时长（分钟）",
-        "type": "int",
-        "hint": "检测到刷屏后自动拉黑的默认时长",
-        "default": 10
-    },
-    "ban_history_inject_threshold": {
-        "description": "拉黑历史注入阈值（次数）",
-        "type": "int",
-        "hint": "当某用户累计被拉黑达到此次数后，其下次触发 LLM 时会把历史拉黑前科（跨群/跨私聊通用，含日期、地点、原因）注入到上下文中，让 Bot 自行判断要『放过』还是用 ban_sender『升级拉黑/永久拉黑』。默认 1：只要这个人以前被拉黑过哪怕 1 次，下次他再出现你就能看到前科——适合『隔天换个群又来作恶』的场景。设为 2 则需累计 2 次以上才提醒。",
-        "default": 1
-    },
-    "max_ban_history": {
-        "description": "每个用户保留的拉黑历史最大条数",
-        "type": "int",
-        "hint": "每个用户最多保留多少条历史拉黑记录，防止数据无限增长。",
-        "default": 20
-    },
+  "auto_blacklist_duration_minutes": {
+    "description": "自动拉黑时长（分钟）",
+    "type": "int",
+    "hint": "检测到刷屏后自动拉黑的默认时长",
+    "default": 10
+  },
+  "ban_history_inject_threshold": {
+    "description": "拉黑历史注入阈值（次数）",
+    "type": "int",
+    "hint": "当某用户累计被拉黑达到此次数后，其下次触发 LLM 时会把历史拉黑前科（跨群/跨私聊通用，含日期、地点、原因）注入到上下文中，让 Bot 自行判断要『放过』还是用 ban_sender『升级拉黑/永久拉黑』。默认 1：只要这个人以前被拉黑过哪怕 1 次，下次他再出现你就能看到前科——适合『隔天换个群又来作恶』的场景。设为 2 则需累计 2 次以上才提醒。",
+    "default": 1
+  },
+  "max_ban_history": {
+    "description": "每个用户保留的拉黑历史最大条数",
+    "type": "int",
+    "hint": "每个用户最多保留多少条历史拉黑记录，防止数据无限增长。",
+    "default": 20
+  },
   "permanent_ban_messages": {
     "description": "永久拉黑用户的自动回复语录列表（支持模板变量）",
     "type": "list",
@@ -82,5 +82,21 @@
     "type": "int",
     "hint": "检测用户是否为 Bot 好友时，会缓存好友列表并按此间隔刷新。默认 3600 秒 = 1 小时。",
     "default": 3600
+  },
+  "ban_count_threshold_for_restrict": {
+    "description": "拉黑次数限制指令阈值",
+    "type": "int",
+    "hint": "当用户累计被拉黑次数达到此值时，将无法使用下方配置的指令（在 on_llm_request 阶段拦截）。建议设为 2~5。",
+    "default": 3
+  },
+  "ban_count_restrict_commands": {
+    "description": "被拉黑多次后禁止使用的指令列表",
+    "type": "list",
+    "hint": "填写指令名称（不含 /），例如：draw、image、chat、music。当用户被拉黑次数 >= 阈值时，这些指令将被拦截。支持字符串列表编辑。",
+    "default": [
+      "draw",
+      "image",
+      "chat"
+    ]
   }
 }
