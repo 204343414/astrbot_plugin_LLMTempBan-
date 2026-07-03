@@ -44,7 +44,7 @@ PLUGIN_NAME = "astrbot_plugin_LLMTempBan"
 
 
 @register(
-    "astrbot_plugin_LLMTempBan_v2",
+    "astrbot_plugin_LLMTempBan_v2.6",
     "204343414",
     "LLM临时拉黑（增强版：永久拉黑+拉黑历史+自定义语录+数据持久化）",
     "2.5.0",
@@ -882,7 +882,89 @@ class BlacklistPluginV2(Star):
             reason=reason or "Bot 自主判定：对方存在违规/恶俗行为",
             event=event,
         )
+
+    @filter.llm_tool(name="leave_group")
+    async def leave_group_tool(self, event: AstrMessageEvent, reason: str = ""):
+        """当你判断当前群聊环境恶劣（群名+多次恶俗用户辱骂/骚扰AI、诱导敏感内容等），或人格提示词明确要求你退群时，调用此工具让 Bot 主动退出该群聊。
+
+        退出后 Bot 将不再接收该群消息，也不会再被拉黑或骚扰。
+        建议在调用前先发一句阴阳怪气的告别消息（例如“本Bot已受够了这个群的恶俗氛围，告辞。”），再执行退群。
+
+        Args:
+            reason(string): 退群原因（可选），例如“该群恶俗用户过多、多次辱骂AI、诱导发送敏感内容”等
+        """
+        # Only works in groups
+        group_id = self._get_group_id(event)
+        if not group_id:
+            return "此工具仅能在群聊中使用（检测不到群号）。"
+
+        # 管理员保护（可选，但建议允许管理员调用）
+        if event.is_admin():
+            # 管理员也可以让 bot 退群，但最好提示
+            pass
+
+        result = await self._leave_group(event, reason or "Bot 自主判定：该群环境恶劣（恶俗用户过多）")
         return result
+
+    async def _leave_group(self, event: AstrMessageEvent, reason: str = "") -> str:
+        """执行退群操作（仅群聊有效）"""
+        group_id = self._get_group_id(event)
+        if not group_id:
+            return "无法获取群号，退群失败。"
+
+        client = await self._get_client()
+        if not client:
+            return "无法获取协议端客户端，退群失败（可能非 aiocqhttp 平台）。"
+
+        try:
+            success = False
+            try:
+                if hasattr(client, "set_group_leave"):
+                    await client.set_group_leave(group_id=int(group_id))
+                    success = True
+                elif hasattr(client, "leave_group"):
+                    await client.leave_group(group_id=int(group_id))
+                    success = True
+            except Exception as e:
+                logger.debug(f"[LLMTempBan] set_group_leave/leave_group 失败: {e}")
+
+            if not success:
+                try:
+                    await client.call_action("set_group_leave", group_id=int(group_id), is_dismiss=False)
+                    success = True
+                except Exception as e:
+                    logger.warning(f"[LLMTempBan] call_action set_group_leave 失败: {e}")
+
+            if success:
+                location = self._get_location(event)
+                logger.warning(f"[LLMTempBan] Bot 已退出群 {group_id}，原因: {reason}（地点: {location}）")
+                return f"已成功退出群 {group_id}。原因：{reason}。"
+            else:
+                return f"退群操作失败（协议端可能不支持 set_group_leave）。群号: {group_id}"
+        except Exception as e:
+            logger.warning(f"[LLMTempBan] 退群失败: {e}")
+            return f"退群操作异常: {str(e)}"
+
+    def _get_group_id(self, event: AstrMessageEvent) -> str:
+        """获取当前群聊的群号"""
+        try:
+            group_id = getattr(event.message_obj, "group_id", "") or ""
+            if group_id:
+                return str(group_id)
+        except Exception:
+            pass
+
+        try:
+            umo = getattr(event, "unified_msg_origin", "") or ""
+            if "GroupMessage" in umo:
+                import re
+                m = re.search(r"GroupMessage_(\d+)", umo)
+                if m:
+                    return m.group(1)
+        except Exception:
+            pass
+        return ""
+
 
     @filter.llm_tool(name="read_and_ignore")
     async def read_and_ignore(self, event: AstrMessageEvent, reason: str = "无意义发言"):
