@@ -1,4 +1,10 @@
 {
+  "auto_approve_friend_requests": {
+    "description": "是否自动同意好友申请",
+    "type": "bool",
+    "hint": "开启后自动同意好友申请；已被永久拉黑的用户不会同意。",
+    "default": false
+  },
   "default_blacklist_duration": {
     "description": "默认拉黑时长（分钟）",
     "type": "int",
