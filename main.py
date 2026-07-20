@@ -60,6 +60,10 @@ class BlacklistPluginV2(Star):
         self.ban_history = {}  # {用户ID: [{time, time_str, duration_text, reason, caller}]}
         self.spam_tracker: dict[str, deque[float]] = {}
 
+        self.auto_approve_friend_requests = self.config.get(
+            "auto_approve_friend_requests", False
+        )
+
         self.default_blacklist_duration = self.config.get(
             "default_blacklist_duration", 5
         )
@@ -313,6 +317,11 @@ class BlacklistPluginV2(Star):
     async def _catch_all_for_spam(self, event: AstrMessageEvent):
         """全局黑名单过滤：被拉黑用户（含命令、LLM）一律 stop_event；私聊额外执行刷屏检测。"""
 
+        # OneBot 请求事件会被 AstrBot 转成 OTHER_MESSAGE，原始请求保存在 raw_message。
+        # 这里只处理好友申请，避免影响普通消息及其他请求类型。
+        if await self._handle_friend_request(event):
+            return
+
         user_id = self._normalize_user_id(event.message_obj.sender.user_id)
 
         # 保护管理员：管理员不受任何拉黑限制
@@ -366,6 +375,41 @@ class BlacklistPluginV2(Star):
         umo = getattr(event, "unified_msg_origin", "") or ""
         if "FriendMessage" in umo and self.enable_auto_spam_blacklist:
             self._check_spam(user_id, event)
+
+    async def _handle_friend_request(self, event: AstrMessageEvent) -> bool:
+        """处理 OneBot 好友申请；返回 True 表示该事件已处理。"""
+        raw = getattr(event.message_obj, "raw_message", None)
+        if not isinstance(raw, dict) or raw.get("request_type") != "friend":
+            return False
+
+        if not self.auto_approve_friend_requests:
+            return True
+
+        user_id = self._normalize_user_id(raw.get("user_id", ""))
+        # 永久拉黑用户不得通过好友申请，即使开启了自动同意。
+        if user_id in self.temporary_blacklist and self.temporary_blacklist[user_id] == float("inf"):
+            logger.info(f"[LLMTempBan] 忽略永久拉黑用户的好友申请 user={user_id}")
+            return True
+
+        flag = raw.get("flag")
+        if not flag:
+            logger.warning("[LLMTempBan] 好友申请缺少 flag，无法自动处理")
+            return True
+
+        client = await self._get_client()
+        if not client:
+            logger.warning("[LLMTempBan] 无法获取协议端客户端，好友申请未处理")
+            return True
+
+        try:
+            if hasattr(client, "set_friend_add_request"):
+                await client.set_friend_add_request(flag=flag, approve=True)
+            else:
+                await client.call_action("set_friend_add_request", flag=flag, approve=True)
+            logger.info(f"[LLMTempBan] 已自动同意好友申请 user={user_id}")
+        except Exception as e:
+            logger.warning(f"[LLMTempBan] 自动同意好友申请失败 user={user_id}: {e}")
+        return True
 
     def _check_spam(self, user_id: str, event: AstrMessageEvent):
         """检测刷屏并可能触发拉黑"""
