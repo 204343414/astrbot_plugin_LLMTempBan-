@@ -1,108 +1,27 @@
 {
-  "auto_approve_friend_requests": {
-    "description": "是否自动同意好友申请",
-    "type": "bool",
-    "hint": "开启后自动同意好友申请；已被永久拉黑的用户不会同意。",
-    "default": false
-  },
-  "default_blacklist_duration": {
-    "description": "默认拉黑时长（分钟）",
-    "type": "int",
-    "hint": "未指定时长时，拉黑操作的默认持续时间（必须为正整数）",
-    "default": 5
-  },
-  "max_ignore_history": {
-    "description": "已读不回历史保留条数",
-    "type": "int",
-    "hint": "每次调用 read_and_ignore 会记录用户消息，下次 LLM 请求时会注入这些历史。设置最大保留条数，防止上下文过长。",
-    "default": 20
-  },
-  "enable_auto_spam_blacklist": {
-    "description": "启用自动刷屏/图片spam检测拉黑",
-    "type": "bool",
-    "default": true,
-    "hint": "检测到同一用户在x秒内连续y次主动触发bot消息时，自动临时拉黑z分钟。同时在on_llm_request中尽早stop_event避免烧token。参考recall_cancel插件的hook使用风格。"
-  },
   "spam_window_seconds": {
-    "description": "自动拉黑检测窗口（秒）",
-    "type": "int",
-    "hint": "在此时间窗口内统计连续主动发消息次数",
-    "default": 60
+    "description": "触发 Bot 的消息洪泛检测窗口（秒）",
+    "type": "float",
+    "default": 10.0
   },
   "spam_threshold": {
-    "description": "自动拉黑阈值（次数）",
+    "description": "窗口积分达到此值后自动静默拉黑。每条消息1分、每张图片额外1分、重复消息额外1分；一条99图会立即触发。",
     "type": "int",
-    "hint": "窗口内达到此连续触发次数即自动拉黑（建议4-8）",
     "default": 5
   },
-  "auto_blacklist_duration_minutes": {
-    "description": "自动拉黑时长（分钟）",
+  "auto_ban_minutes": {
+    "description": "自动洪泛拉黑时长（分钟）",
     "type": "int",
-    "hint": "检测到刷屏后自动拉黑的默认时长",
     "default": 10
   },
-  "ban_history_inject_threshold": {
-    "description": "拉黑历史注入阈值（次数）",
+  "default_ban_minutes": {
+    "description": "ban_sender 未提供有效正数时的默认时长；-1表示永久",
     "type": "int",
-    "hint": "当某用户累计被拉黑达到此次数后，其下次触发 LLM 时会把历史拉黑前科（跨群/跨私聊通用，含日期、地点、原因）注入到上下文中，让 Bot 自行判断要『放过』还是用 ban_sender『升级拉黑/永久拉黑』。默认 1：只要这个人以前被拉黑过哪怕 1 次，下次他再出现你就能看到前科——适合『隔天换个群又来作恶』的场景。设为 2 则需累计 2 次以上才提醒。",
-    "default": 1
+    "default": -1
   },
-  "max_ban_history": {
-    "description": "每个用户保留的拉黑历史最大条数",
+  "max_tracked_senders": {
+    "description": "内存中最多保留的洪泛计数发送者，防止状态无限增长",
     "type": "int",
-    "hint": "每个用户最多保留多少条历史拉黑记录，防止数据无限增长。",
-    "default": 20
-  },
-  "permanent_ban_messages": {
-    "description": "永久拉黑用户的自动回复语录列表（支持模板变量）",
-    "type": "list",
-    "hint": "被永久拉黑的用户再次触发 Bot 时，会每隔 'permanent_ban_reply_interval' 秒随机抽取一条发送。可用模板变量：{user_id} 用户ID、{duration} 拉黑时长（永久时显示'永久'）、{ban_time} 拉黑时间（如 2026-06-25 14:30）。",
-    "default": [
-      "您已被拉黑 {user_id}，已拉黑 {duration}。",
-      "被拉黑还锲而不舍地戳 Bot，建议输入 /删除bot 或自行删除 Bot 好友，对大家都好~",
-      "您已被永久拉黑，请继续表演，反正 Bot 不会再理你了。",
-      "黑名单里的空气还好吗？{user_id} 同学。",
-      "低质量骚扰已触发永久屏蔽，您已收获 Bot 的沉默大礼包。"
-    ]
-  },
-  "friend_permanent_ban_messages": {
-    "description": "【可选】好友专用永久拉黑语录列表（为空则使用通用语录）",
-    "type": "list",
-    "hint": "如果目标用户是 Bot 的 QQ 好友，且被永久拉黑，会优先使用这里的语录；为空则使用上面的通用语录。支持同样的模板变量。",
-    "default": []
-  },
-  "permanent_ban_reply_interval": {
-    "description": "永久拉黑自动回复间隔（秒）",
-    "type": "int",
-    "hint": "被永久拉黑的用户每次触发 Bot 后，至少要间隔这么多秒才会再次收到自动回复语录。默认 3600 秒 = 1 小时。",
-    "default": 3600
-  },
-  "auto_delete_friend_on_permanent_ban": {
-    "description": "永久拉黑好友时是否自动删除好友（参考 HappyBirthday 插件的好友列表检测）",
-    "type": "bool",
-    "hint": "开启后，当管理员/LLM 永久拉黑的目标用户是 Bot 的 QQ 好友时，会自动调用 OneBot 接口删除好友。默认关闭，请确认你的协议端支持 delete_friend 再开启。",
-    "default": false
-  },
-  "friend_list_refresh_interval": {
-    "description": "好友列表缓存刷新间隔（秒）",
-    "type": "int",
-    "hint": "检测用户是否为 Bot 好友时，会缓存好友列表并按此间隔刷新。默认 3600 秒 = 1 小时。",
-    "default": 3600
-  },
-  "ban_count_threshold_for_restrict": {
-    "description": "拉黑次数限制指令阈值",
-    "type": "int",
-    "hint": "当用户累计被拉黑次数达到此值时，将无法使用下方配置的指令（在 on_llm_request 阶段拦截）。建议设为 2~5。",
-    "default": 3
-  },
-  "ban_count_restrict_commands": {
-    "description": "被拉黑多次后禁止使用的指令列表",
-    "type": "list",
-    "hint": "填写指令名称（不含 /），例如：draw、image、chat、music。当用户被拉黑次数 >= 阈值时，这些指令将被拦截。支持字符串列表编辑。",
-    "default": [
-      "draw",
-      "image",
-      "chat"
-    ]
+    "default": 2000
   }
 }
