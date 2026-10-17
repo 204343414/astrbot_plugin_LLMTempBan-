@@ -185,18 +185,28 @@ class LLMTempBanPlugin(Star):
 
     @staticmethod
     def _targets_bot(event: AstrMessageEvent) -> bool:
+        """Only count private messages or group messages that @ this bot."""
         origin = str(getattr(event, "unified_msg_origin", "") or "")
-        if "FriendMessage" in origin:
-            return True
         if "GroupMessage" not in origin:
+            return "FriendMessage" in origin or "PrivateMessage" in origin
+
+        try:
+            chain = list(event.get_messages())
+        except (AttributeError, TypeError):
+            chain = list(getattr(getattr(event, "message_obj", None), "message", None) or [])
+        at_components = [component for component in chain if isinstance(component, At)]
+        if not at_components:
             return False
-        if bool(getattr(event, "is_at_or_wake_command", False)) or bool(getattr(event, "is_wake", False)):
-            return True
-        text = str(getattr(event, "message_str", "") or "").lstrip()
-        if text.startswith("/"):
-            return True
-        chain = getattr(event.message_obj, "message", None) or []
-        return any(isinstance(component, At) for component in chain)
+
+        try:
+            self_id = str(event.get_self_id() or "").strip()
+        except (AttributeError, TypeError):
+            self_id = str(getattr(getattr(event, "message_obj", None), "self_id", "") or "").strip()
+        if self_id:
+            return any(str(getattr(component, "qq", "")).strip() == self_id for component in at_components)
+
+        # Older adapters may omit self_id, but their wake flag still identifies @bot.
+        return bool(getattr(event, "is_at_or_wake_command", False))
 
     @staticmethod
     def _message_fingerprint(event: AstrMessageEvent) -> tuple[str, int]:
