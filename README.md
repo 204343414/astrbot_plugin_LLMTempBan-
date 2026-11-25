@@ -1,3 +1,16 @@
+> **当前真实能力（v3.1.0，以代码为准）**
+>
+> 本插件只注册 **两个** LLM 工具：
+>
+> | 工具 | 作用 |
+> |---|---|
+> | `ban_sender` | 拉黑当前说话人（静默，之后不再进 LLM） |
+> | `stay_silent` | **这一条不回**（已读不回），对话历史照常保存 |
+>
+> ⚠️ 历史文档（`README_UPDATE.md`、`README_v2.6.1.md`、`README_v2.6.2.md`）
+> 里写的 `leave_group` 工具 **从未存在于代码中**（`grep leave_group main.py`
+> 为空）。请勿据此判断能力；需要退群请人工操作。
+
 # astrbot_plugin_LLMTempBan（增强版 v2.6.0）
 
 ## 🆕 v2.6.0 更新

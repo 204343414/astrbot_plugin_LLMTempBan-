@@ -1,10 +1,10 @@
 name: astrbot_plugin_LLMTempBan
 display_name: LLM临时拉黑 + 自动反刷屏 + 退群
-short_desc: 临时拉黑 + 已读不回 + 自动检测刷屏/图片spam + LLM 自主退群工具（群环境恶劣时调用）。
-desc: 一个为 AstrBot 设计的 LLM 临时拉黑屏蔽插件，支持管理员拉黑、普通用户自助拉黑、反拉黑保护、已读不回、自动刷屏检测，以及新增 LLM 自主退群工具（Bot 可根据人格提示词或群名+恶俗用户判断调用 leave_group 主动退出群聊）。参考recall_cancel插件的on_llm_request等hook设计。
+short_desc: 临时拉黑 + 已读不回（stay_silent 工具）+ 自动检测刷屏/图片 spam。
+desc: LLM 临时拉黑 + 已读不回。黑名单静默拦截（不进 LLM、不发言）；stay_silent 工具让模型可以对单条消息选择不回，对话历史照常保存；附带群聊刷屏/图片 spam 检测。（历史文档提到的 leave_group 退群工具从未在代码中实现，已从描述中移除。）
 repo: "https://github.com/204343414/astrbot_plugin_LLMTempBan-"
 author: "204343414"
-version: v2.6.0
+version: v3.1.0
 support_platforms:
   - aiocqhttp
   - qq_official

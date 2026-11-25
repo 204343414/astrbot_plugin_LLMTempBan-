@@ -3,7 +3,7 @@
 只保留三件事：
 1. 在消息进入 LLM/命令前拦截已拉黑用户；
 2. 对真正触发 Bot 的私聊、群聊消息做短窗口洪泛检测，图片按张数计分；
-3. 提供唯一 LLM 工具 ban_sender，让模型拉黑当前说话人。
+3. 提供两个 LLM 工具：ban_sender（拉黑当前说话人）、stay_silent（这一条不回）。
 
 被拉黑后完全静默，不发送嘲讽、不调用 LLM、不操作好友、不查询群角色、不退群。
 """
@@ -23,13 +23,16 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 
 PLUGIN_NAME = "astrbot_plugin_LLMTempBan"
+#: 只在这一处写版本号：日志、注册、metadata 各写一遍的话，迟早对不上
+#: （从前的日志就一直印着 v3.0，而 metadata 写的是 v2.6.0）。
+PLUGIN_VERSION = "3.1.0"
 
 
 @register(
     "astrbot_plugin_LLMTempBan",
     "204343414",
     "QQ官方Bot静默拉黑与图片/消息洪泛防护",
-    "3.0.0",
+    PLUGIN_VERSION,
     "",
 )
 class LLMTempBanPlugin(Star):
@@ -49,7 +52,8 @@ class LLMTempBanPlugin(Star):
         self._load_data()
 
         logger.info(
-            "[LLMTempBan] v3.0 已加载：%d 个会话级拉黑，%d 个旧版全局拉黑；阈值=%d分/%.1f秒",
+            "[LLMTempBan] v%s 已加载：%d 个会话级拉黑，%d 个旧版全局拉黑；阈值=%d分/%.1f秒",
+            PLUGIN_VERSION,
             len(self.bans), len(self.legacy_global_bans), self.spam_threshold, self.window_seconds,
         )
 
@@ -298,6 +302,54 @@ class LLMTempBanPlugin(Star):
             reason=reason or "LLM 判定当前说话人存在明显恶意行为",
             source="llm_ban_sender",
         )
+
+    @filter.llm_tool(name="stay_silent")
+    async def stay_silent(
+        self,
+        event: AstrMessageEvent,
+        reason: str = "",
+    ):
+        """这一条消息决定不回复（已读不回）。当对方的话不需要回应、只是路过感叹、
+        自说自话、或者继续接话只会显得机器人在刷屏时调用。**不要**用它回避提问、
+        回避该道的歉、或回避用户在等答案的事——那种情况必须回答。
+
+        与 ban_sender 的区别：这是「这一条不回」，不是「以后都不理这个人」。
+        对方的对话历史照常保存，下一条消息仍会正常处理。
+
+        Args:
+            reason(string): 为什么选择不回，一句话即可，仅写进日志供排查。
+        """
+        # 只做标记，真正的压制在 on_decorating_result 里完成。
+        # 为什么不在这里直接 set_result(None)：工具调用只是 LLM 的一个中间步骤，
+        # 之后它自己还会再产出一段「补充说明」文本 —— 实测就是那句
+        # 「抱歉，我这边没有已读不回的开关…」，正是用户看到的那句废话。
+        # 在装饰阶段统一压掉才是"真的不发"。
+        event.set_extra("__llmtempban_silent__", str(reason or "")[:200])
+        logger.info(
+            "[LLMTempBan] 模型选择不回复 origin=%s reason=%s",
+            self._origin(event),
+            str(reason or "")[:100],
+        )
+        # 返回给模型的话，让它别再试图补一句
+        return "已停止本次回复。不要再输出任何内容，不要解释。"
+
+    @filter.on_decorating_result()
+    async def suppress_silent_reply(self, event: AstrMessageEvent):
+        """把「选择不回」那一条的结果清空。
+
+        为什么不用 ``event.stop_event()``：那个会把整条事件从管道里掐断，
+        连带这轮对话**不写进历史** —— 模型下次完全不记得自己沉默过，于是
+        同一个梗它可能一连沉默好几次，或者反过来完全没沉默过却以为沉默了。
+        只是清空结果的话，发送阶段就没有东西可发，而历史照常保存。
+
+        实测依据：``result_decorate/stage.py`` 里对 ``set_result(None)`` 有
+        明确处理（日志 "cleared the message result"），并且之后仍然会走到
+        「再取一次结果」的发送逻辑，取到 None 自然什么都不发。
+        """
+        if not event.get_extra("__llmtempban_silent__"):
+            return
+        event.set_result(None)
+        logger.info("[LLMTempBan] 已拦下本次回复（模型选择已读不回）")
 
     @filter.command("解禁_")
     @filter.permission_type(filter.PermissionType.ADMIN)
